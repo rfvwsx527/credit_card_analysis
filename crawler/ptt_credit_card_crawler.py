@@ -140,6 +140,49 @@ def crawl_index_page(page_num: int) -> list[dict]:
     return articles
 
 
+def get_page_first_article_year(page_num: int) -> int | None:
+    """取得某索引頁第一篇有效文章的年份（用於估算）。"""
+    articles = crawl_index_page(page_num)
+    for art in articles:
+        _, pub_time_str = fetch_post_content(art["url"])
+        time.sleep(REQUEST_DELAY)
+        if pub_time_str:
+            return int(pub_time_str[:4])
+    return None
+
+
+def estimate_total_posts(latest_page: int) -> tuple[int, int]:
+    """
+    用二分搜尋估算 START_YEAR 起始頁，回傳 (估算總文章數, 起始頁碼)。
+    PTT 每頁約 20 篇文章。
+    """
+    logger.info(f"📊 估算 {START_YEAR} 年至今的文章總數中（二分搜尋）…")
+
+    low, high = 1, latest_page
+    start_page = latest_page   # 預設值（找不到時當作只有當前頁）
+
+    while low <= high:
+        mid = (low + high) // 2
+        year = get_page_first_article_year(mid)
+
+        if year is None:
+            # 拿不到年份就視為新頁面（往舊邊找）
+            high = mid - 1
+            continue
+
+        logger.info(f"   檢查第 {mid} 頁：首篇文章為 {year} 年")
+
+        if year >= START_YEAR:
+            start_page = mid
+            high = mid - 1     # 嘗試更舊的頁
+        else:
+            low = mid + 1      # 該頁過舊，往新邊找
+
+    pages_to_crawl = latest_page - start_page + 1
+    estimated_posts = pages_to_crawl * 20   # PTT 每頁約 20 篇
+    return estimated_posts, start_page
+
+
 def fetch_post_content(url: str) -> tuple[str, str | None]:
     """爬取單篇文章內文與發文時間，回傳 (內文, 'YYYY-MM-DD HH:MM:SS' 或 None)。"""
     if not url:
@@ -192,6 +235,14 @@ def main():
 
     latest_page = get_latest_index()
     logger.info(f"最新索引頁：{latest_page}")
+
+    # 估算總文章數
+    estimated_posts, start_page = estimate_total_posts(latest_page)
+    logger.info("=" * 60)
+    logger.info(f"📌 預計爬取頁數：{latest_page - start_page + 1} 頁（第 {start_page} ~ {latest_page} 頁）")
+    logger.info(f"📌 預估貼文總數：約 {estimated_posts} 篇")
+    logger.info(f"📌 預估耗時：約 {estimated_posts * REQUEST_DELAY / 60:.1f} 分鐘")
+    logger.info("=" * 60)
 
     batch: list[dict] = []
     total_saved = 0
