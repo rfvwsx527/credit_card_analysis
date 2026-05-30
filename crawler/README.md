@@ -21,7 +21,7 @@ uv run python scraper_banks.py
 uv run python scraper_banks.py --bank esun
 
 # 產生除錯截圖
-uv run python scraper_banks.py --debug
+uv run python scraper_banks.py --show --debug
 ```
 
 支援銀行：`esun` `cathaybk` `taishin` `sinopac` `yuanta` `kgi` `dbs` `hsbc` `scb` `fubon` `ctbc`
