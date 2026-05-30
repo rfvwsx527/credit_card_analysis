@@ -1,15 +1,12 @@
 """
 各銀行官網爬蟲 (scraper_banks.py) — Playwright
 ====================================================
-v10 (2026-05)
+v11 (2026-05)
 
-相對 v9 變更:
-1. 中信由 hardcode 改為動態爬取
-   URL: /content/twrbo/zh_tw/cc_index/cc_product/cc_introduction_index.html
-2. JS 擷取器同時取每張卡的「亮點」(bullets / 含特徵詞短句)
-3. Python 用 keyword 對卡名 + 亮點分類成「類別」
-   分類: 現金回饋 / 哩程 / LINE Pay/Points / 紅利點數 / 聯名卡 /
-        電商/購物聯名卡 / 旅遊卡 / 頂級卡 / 簽帳金融卡 / 一般卡
+v11 變更:
+1. 中信加強反偵測 + 多 URL 輪試 (APP-1053 系統忙碌錯誤對策)
+2. 動態抓不到時,自動退回精簡 hardcode 並 log 警告
+3. CSV 預設輸出到 ../crawler_data/banks.csv (相對 script),自動建資料夾
 
 如果輸出 CSV 沒看到「類別」欄,代表 card_common.py 的 COLUMNS 未含
 「類別」字串,請補上即可顯示。
@@ -17,6 +14,7 @@ v10 (2026-05)
 
 import argparse
 import time
+from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 from card_common import (
@@ -24,6 +22,42 @@ from card_common import (
 )
 
 log = setup_logger("scraper_banks", "scraper_banks.log")
+
+# 預設輸出路徑:相對 script 位置,放到專案的 crawler_data/ 子目錄
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_OUTPUT = SCRIPT_DIR.parent / "crawler_data" / "banks.csv"
+
+
+# 中信動態抓不到時的精簡 fallback 清單 (僅卡名 + URL)
+# 走 _build_record 仍會跑 classify_category 自動補類別
+CTBC_FALLBACK_CARDS = [
+    ("中信LINE Pay卡",      "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/LINEPay/index.html",
+     ["LINE POINTS 最高 16% 回饋", "國內外一般消費 1% 回饋", "國外實體商店消費 2.8% 回饋"]),
+    ("中信ALL ME卡",        "https://mkt.ctbcbank.com/long/creditcard/ALLME_CHT/index.html",
+     ["天天享 3% 回饋", "月月賺 $300", "國外消費 2.2% 無上限"]),
+    ("中信foodpanda聯名卡", "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/foodpanda/index.html",
+     ["foodpanda 點餐享胖達幣回饋", "全站消費最高 10% 胖達幣回饋"]),
+    ("中信和泰聯名卡",      "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/Hotai/index.html",
+     ["iRent / yoxi 享最高 10% 回饋", "和泰集團通路享和泰 Points"]),
+    ("中信中華航空聯名卡",  "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/CTBCCI/index.html",
+     ["國外消費最高 2 元 = 1 哩程", "華航官網購票享優惠"]),
+    ("中信uniopen聯名卡",   "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/uniopen/index.html",
+     ["7-ELEVEN / 統一集團通路最高 8% OPENPOINT", "新戶首刷禮"]),
+    ("中信遠東SOGO聯名卡",  "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/SOGO/index.html",
+     ["SOGO 百貨單筆消費最高 6% 回饋", "週年慶滿額禮"]),
+    ("中信財管鼎鑽卡",      "https://mkt.ctbcbank.com/long/creditcard/WMmember/index.html",
+     ["財富管理會員專屬權益", "機場接送、貴賓室、高爾夫禮遇"]),
+    ("中信商旅鈦金卡",      "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/bussiness/index.html",
+     ["指定通路最高回饋", "新戶首刷享刷卡金"]),
+    ("中信中油聯名卡",      "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/CPC/index.html",
+     ["中油直營站綁定中油 Pay 最高 6.8% 回饋", "新戶最高贈 $300 加油金"]),
+    ("中信Taipei 101聯名卡","https://www.ctbcbank.com/content/dam/minisite/long/creditcard/Taipei101/index.html",
+     ["Taipei 101 樓層消費享回饋", "卡友訂位特權"]),
+    ("中信秀泰聯名卡",      "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/showtime/index.html",
+     ["秀泰影城享電影票優惠", "影城內消費回饋"]),
+    ("中信Agoda聯名卡",     "https://mkt.ctbcbank.com/long/creditcard/agoda/index.html",
+     ["Agoda 訂房享 A 金回饋", "海外消費最高回饋"]),
+]
 
 
 # ─── 卡名 + 亮點 同步擷取 JS (js 策略用) ─────────────────────────────────────
@@ -326,6 +360,10 @@ JS_EXTRACT_HREFS_WITH_HIGHLIGHTS = r"""
 
 # ─── 類別分類 (Python) ──────────────────────────────────────────────────────
 
+import re as _re_for_classify
+_PCT_FEEDBACK_RE = _re_for_classify.compile(r'[%％]\s*回饋')
+
+
 def classify_category(card_name: str, highlights: list[str]) -> str:
     """根據卡名 + 亮點 keyword 對應到類別"""
     name = card_name or ''
@@ -378,8 +416,8 @@ def classify_category(card_name: str, highlights: list[str]) -> str:
             return '電商/購物聯名卡'
         return '聯名卡'
 
-    # ⭐ 從亮點推:%回饋 → 現金回饋 (要在旅遊之前判斷)
-    if '%回饋' in text or '％回饋' in text or '現金回饋' in text:
+    # ⭐ 從亮點推:%回饋 → 現金回饋 (容忍 % 與「回饋」間的空白,放在旅遊之前)
+    if _PCT_FEEDBACK_RE.search(text) or '現金回饋' in text:
         return '現金回饋'
 
     # 旅遊 (亮點有機場/貴賓室/旅平險等)
@@ -394,12 +432,18 @@ def classify_category(card_name: str, highlights: list[str]) -> str:
 
 BANK_CONFIGS = {
     "ctbc": {
-        # 中信:所有卡片介紹頁 (JS 渲染,Playwright 才能取到內容)
+        # 中信:嘗試多個入口,避免某一個 URL 觸發 APP-1053
         "name": "中國信託銀行",
-        "url": "https://www.ctbcbank.com/content/twrbo/zh_tw/cc_index/cc_product/cc_introduction_index.html",
-        "fallback_url": "https://www.ctbcbank.com/content/twrbo/zh_tw/cc_index/cc_product/cc_hot.html",
+        "url": "https://www.ctbcbank.com/twrbo/zh_tw/cc_index/cc_product/cc_introduction_index.html",
+        "fallback_urls": [
+            "https://www.ctbcbank.com/content/twrbo/zh_tw/cc_index/cc_product/cc_introduction_index.html",
+            "https://www.ctbcbank.com/twrbo/zh_tw/cc_index/cc_product/cc_hot.html",
+            "https://www.ctbcbank.com/content/twrbo/zh_tw/cc_index/cc_product/cc_hot.html",
+        ],
+        "referer": "https://www.ctbcbank.com/twrbo/zh_tw/index.html",
         "wait_for": "body",
         "strategy": "js",
+        "fallback_hardcode": "ctbc",  # 動態抓 0 筆時退回 hardcode
     },
     "esun": {
         "name": "玉山銀行",
@@ -480,36 +524,82 @@ def _build_record(*, bank_name, bank_code, card_name, highlights, apply_url, sou
     return rec
 
 
+def _ctbc_fallback_records(name: str, code: str) -> list[dict]:
+    """中信動態爬取完全失敗時的精簡 hardcode 後備"""
+    records = []
+    for cn, url, hl in CTBC_FALLBACK_CARDS:
+        records.append(_build_record(
+            bank_name=name, bank_code=code, card_name=cn,
+            highlights=hl, apply_url=url, source=url,
+        ))
+    return records
+
+
+def _looks_like_error_page(page) -> bool:
+    """偵測中信 APP-1053 / 系統忙碌 / 503 等錯誤頁"""
+    try:
+        text = page.evaluate(
+            "() => (document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 500)"
+        )
+    except Exception:
+        return False
+    if not text:
+        return False
+    markers = ['APP-1053', '系統忙碌', '系統繁忙', '請稍後再試',
+               '503 Service', 'Service Unavailable', '網頁暫無法顯示']
+    return any(m in text for m in markers)
+
+
 def scrape_bank(page, code: str, cfg: dict, debug: bool = False) -> list[dict]:
     name = cfg["name"]
+    # 蒐集所有要嘗試的 URL (支援單 fallback_url 與 list fallback_urls 兩種設定)
     urls = [cfg["url"]]
     if "fallback_url" in cfg:
         urls.append(cfg["fallback_url"])
+    if "fallback_urls" in cfg:
+        urls.extend(cfg["fallback_urls"])
+
+    referer = cfg.get("referer")
 
     soup_url = None
     for url in urls:
         log.info(f"開始爬取:{name}({url})")
+        nav_kwargs = {"timeout": 60000, "wait_until": "networkidle"}
+        if referer:
+            nav_kwargs["referer"] = referer
         try:
-            page.goto(url, timeout=60000, wait_until="networkidle")
-            soup_url = url
-            break
+            page.goto(url, **nav_kwargs)
         except PWTimeout:
             log.warning(f"[{name}] networkidle 逾時,改 domcontentloaded")
             try:
-                page.goto(url, timeout=40000, wait_until="domcontentloaded")
+                page.goto(url, timeout=40000, wait_until="domcontentloaded",
+                          **({"referer": referer} if referer else {}))
                 try:
                     page.wait_for_selector(cfg["wait_for"], timeout=12000)
                 except PWTimeout:
                     pass
-                soup_url = url
-                break
             except Exception as e:
                 log.warning(f"[{name}] 載入失敗:{e}")
+                continue
         except Exception as e:
             log.warning(f"[{name}] 載入失敗:{e}")
+            continue
+
+        # 偵測錯誤頁,若是 → 試下一個 URL
+        page.wait_for_timeout(1500)
+        if _looks_like_error_page(page):
+            log.warning(f"[{name}] 偵測到錯誤頁 (APP-1053/系統忙碌),改試下一個 URL")
+            continue
+
+        soup_url = url
+        break
 
     if not soup_url:
-        log.error(f"[{name}] 所有 URL 失敗")
+        log.error(f"[{name}] 所有 URL 失敗或皆回錯誤頁")
+        # 中信:全部 URL 都失敗 → hardcode 後備
+        if cfg.get("fallback_hardcode") == "ctbc":
+            log.warning(f"[{name}] 改用 hardcode 後備清單 ({len(CTBC_FALLBACK_CARDS)} 張)")
+            return _ctbc_fallback_records(name, code)
         return []
 
     _scroll_to_bottom(page)
@@ -545,7 +635,7 @@ def scrape_bank(page, code: str, cfg: dict, debug: bool = False) -> list[dict]:
         sample = [(r['text'], r.get('highlights', [])[:2]) for r in raw[:3]]
         log.debug(f"[{name}] 前 3 筆樣本:{sample}")
 
-    # 以 NoiseFilter 過濾無效卡名 + 去重 (保留原順序)
+    # 以 NoiseFilter 過濾無效卡名 + 去重
     valid_names = NoiseFilter.dedupe(
         [r["text"] for r in raw if NoiseFilter.is_valid(r["text"])]
     )
@@ -564,6 +654,11 @@ def scrape_bank(page, code: str, cfg: dict, debug: bool = False) -> list[dict]:
             apply_url=r.get("href") or soup_url,
             source=soup_url,
         ))
+
+    # 中信動態抓 0 筆 → hardcode 後備
+    if not records and cfg.get("fallback_hardcode") == "ctbc":
+        log.warning(f"[{name}] 動態 0 筆,改用 hardcode 後備清單")
+        return _ctbc_fallback_records(name, code)
 
     log.info(f"  ✅ {name}:{len(records)} 張(JS回傳 {len(raw)} → 有效 {len(records)})")
     return records
@@ -589,7 +684,10 @@ def run(bank_filter=None, output=None, headless=True, debug=False):
     if bank_filter:
         if bank_filter not in all_codes:
             log.error(f"未知代碼:{bank_filter},可用:{', '.join(all_codes)}")
-            return save_csv([], output, "banks")
+            # 提前處理 output 路徑供空檔輸出
+            out_path = Path(output) if output else DEFAULT_OUTPUT
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            return save_csv([], str(out_path), "banks")
         run_codes = [bank_filter]
     else:
         run_codes = all_codes
@@ -599,7 +697,11 @@ def run(bank_filter=None, output=None, headless=True, debug=False):
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=headless,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-features=IsolateOrigins,site-per-process",
+            ],
         )
         context = browser.new_context(
             user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -607,10 +709,27 @@ def run(bank_filter=None, output=None, headless=True, debug=False):
                         "Chrome/124.0.0.0 Safari/537.36"),
             viewport={"width": 1440, "height": 900},
             locale="zh-TW",
+            timezone_id="Asia/Taipei",
+            extra_http_headers={
+                "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+                "Accept": ("text/html,application/xhtml+xml,application/xml;"
+                           "q=0.9,image/avif,image/webp,*/*;q=0.8"),
+            },
         )
-        context.add_init_script(
-            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-        )
+        # 強化反偵測:抹除多項 Playwright/Headless 指紋
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'languages', {get: () => ['zh-TW', 'zh', 'en']});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            window.chrome = {runtime: {}};
+            const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+            if (originalQuery) {
+                window.navigator.permissions.query = (params) =>
+                    params.name === 'notifications'
+                        ? Promise.resolve({state: Notification.permission})
+                        : originalQuery(params);
+            }
+        """)
         page = context.new_page()
         success = 0
         for code in run_codes:
@@ -628,18 +747,20 @@ def run(bank_filter=None, output=None, headless=True, debug=False):
 
     log.info(f"📊 總計 {len(all_records)} 張")
 
-    if output is None:
-        output = "banks.csv"
-    df = save_csv(all_records, output, "banks")
-    log.info(f"✅ 儲存:{output}({len(df)} 筆)")
+    # 處理 output 路徑:預設 ../crawler_data/banks.csv,自動建資料夾
+    out_path = Path(output) if output else DEFAULT_OUTPUT
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df = save_csv(all_records, str(out_path), "banks")
+    log.info(f"✅ 儲存:{out_path}({len(df)} 筆)")
     return df
 
 
 if __name__ == "__main__":
     all_codes = list(BANK_CONFIGS.keys())
-    ap = argparse.ArgumentParser(description="各銀行官網爬蟲 v10")
+    ap = argparse.ArgumentParser(description="各銀行官網爬蟲 v11")
     ap.add_argument("--bank", help=f"銀行代碼:{', '.join(all_codes)}")
-    ap.add_argument("--output", default="banks.csv", help="輸出 CSV (預設 banks.csv)")
+    ap.add_argument("--output", default=None,
+                    help=f"輸出 CSV (預設 {DEFAULT_OUTPUT})")
     ap.add_argument("--show", action="store_true")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
