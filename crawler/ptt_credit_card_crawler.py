@@ -22,7 +22,7 @@ from datetime import datetime
 # ── 設定 ────────────────────────────────────────────────────────────────────
 BOARD = "creditcard"
 BASE_URL = "https://www.ptt.cc"
-START_YEAR = 2024          # 只保留這年（含）之後的文章
+START_YEAR = 2025          # 只保留這年（含）之後的文章
 OUTPUT_DIR = "../crawler_data"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "ptt_credit_card.csv")
 REQUEST_DELAY = 0.4        # 每次請求間隔秒數（請勿設定過低，避免對伺服器造成負擔）
