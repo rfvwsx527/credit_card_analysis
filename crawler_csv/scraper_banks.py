@@ -99,6 +99,11 @@ JS_EXTRACT_CARDS_WITH_HIGHLIGHTS = r"""
         // 圖檔/規格殘留
         'Icon/','70x70','px ','px,','px、',
     ];
+    // 動詞開頭的雜物 (按鈕/動作而非卡名),如「申辦凱基信用卡」「我要辦卡」「換發多幣卡」
+    const denyStartsWith = [
+        '申辦','我要','換發','前往','查詢','立即','馬上','按此','點此',
+        '前往申辦','點擊',
+    ];
     const inlineTags = new Set([
         'STRONG','EM','SPAN','I','B','U','BR','SMALL','SUB','SUP','MARK','FONT'
     ]);
@@ -139,6 +144,7 @@ JS_EXTRACT_CARDS_WITH_HIGHLIGHTS = r"""
     };
 
     const cardEls = [];
+    const debugDenied = [];  // 被 deny 規則濾掉的候選 (debug 用)
     for (const el of document.querySelectorAll('*')) {
         if (isInSkip(el)) continue;   // 跳過導覽/側邊/頁尾區內的元素
         let containerLike = false;
@@ -153,9 +159,21 @@ JS_EXTRACT_CARDS_WITH_HIGHLIGHTS = r"""
         const rawTxt = ((el.innerText || el.textContent || '') + '').trim();
         if (!looksLikeCard(rawTxt)) continue;
         const txt = normalizeName(rawTxt);
-        if (denyExact.has(txt)) continue;
-        if (denyInclude.some(k => txt.includes(k))) continue;
-        if ((txt.match(/[、，。！？:：；]/g) || []).length >= 2) continue;
+        if (denyExact.has(txt)) { debugDenied.push(txt + ' [denyExact]'); continue; }
+        if (denyInclude.some(k => txt.includes(k))) {
+            const k = denyInclude.find(k => txt.includes(k));
+            debugDenied.push(txt + ' [denyInclude:' + k + ']');
+            continue;
+        }
+        if (denyStartsWith.some(k => txt.startsWith(k))) {
+            const k = denyStartsWith.find(k => txt.startsWith(k));
+            debugDenied.push(txt + ' [denyStartsWith:' + k + ']');
+            continue;
+        }
+        if ((txt.match(/[、，。！？:：；]/g) || []).length >= 2) {
+            debugDenied.push(txt + ' [punct]');
+            continue;
+        }
         cardEls.push({el, name: txt});
     }
     for (const img of document.querySelectorAll('img[alt]')) {
@@ -163,8 +181,17 @@ JS_EXTRACT_CARDS_WITH_HIGHLIGHTS = r"""
         const rawAlt = (img.alt || '').trim();
         if (!looksLikeCard(rawAlt)) continue;
         const alt = normalizeName(rawAlt);
-        if (denyExact.has(alt)) continue;
-        if (denyInclude.some(k => alt.includes(k))) continue;
+        if (denyExact.has(alt)) { debugDenied.push('[img]'+alt+' [denyExact]'); continue; }
+        if (denyInclude.some(k => alt.includes(k))) {
+            const k = denyInclude.find(k => alt.includes(k));
+            debugDenied.push('[img]'+alt+' [denyInclude:'+k+']');
+            continue;
+        }
+        if (denyStartsWith.some(k => alt.startsWith(k))) {
+            const k = denyStartsWith.find(k => alt.startsWith(k));
+            debugDenied.push('[img]'+alt+' [denyStartsWith:'+k+']');
+            continue;
+        }
         cardEls.push({el: img, name: alt});
     }
 
@@ -249,7 +276,7 @@ JS_EXTRACT_CARDS_WITH_HIGHLIGHTS = r"""
             highlights: highlights
         });
     }
-    return results;
+    return { results: results, denied: debugDenied };
 }
 """
 
@@ -301,6 +328,11 @@ JS_EXTRACT_HREFS_WITH_HIGHLIGHTS = r"""
         '已於','並於','升級為','更名為','併入','整併為','改名為',
         // 圖檔/規格殘留
         'Icon/','70x70','px ','px,','px、',
+    ];
+    // 動詞開頭的雜物 (按鈕/動作而非卡名)
+    const denyStartsWith = [
+        '申辦','我要','換發','前往','查詢','立即','馬上','按此','點此',
+        '前往申辦','點擊',
     ];
     const inlineTags = new Set([
         'STRONG','EM','SPAN','I','B','U','BR','SMALL','SUB','SUP','MARK','FONT'
@@ -375,6 +407,7 @@ JS_EXTRACT_HREFS_WITH_HIGHLIGHTS = r"""
             const nm = normalizeName(t);
             if (denyExact.has(nm)) continue;
             if (denyInclude.some(k => nm.includes(k))) continue;
+            if (denyStartsWith.some(k => nm.startsWith(k))) continue;
             name = nm;
             break;
         }
@@ -807,12 +840,22 @@ def scrape_bank(page, code: str, cfg: dict, debug: bool = False) -> list[dict]:
         if not raw:
             log.warning(f"[{name}] href 策略未取得卡名,回退 js")
             try:
-                raw = page.evaluate(JS_EXTRACT_CARDS_WITH_HIGHLIGHTS)
+                _r = page.evaluate(JS_EXTRACT_CARDS_WITH_HIGHLIGHTS)
+                raw = _r.get("results", []) if isinstance(_r, dict) else _r
+                if debug and isinstance(_r, dict) and _r.get("denied"):
+                    log.info(f"[{name}] 被 deny 過濾的候選 ({len(_r['denied'])} 筆):")
+                    for d in _r["denied"][:20]:
+                        log.info(f"        - {d}")
             except Exception as e:
                 log.warning(f"[{name}] js 抓取失敗:{e}")
     else:
         try:
-            raw = page.evaluate(JS_EXTRACT_CARDS_WITH_HIGHLIGHTS)
+            _r = page.evaluate(JS_EXTRACT_CARDS_WITH_HIGHLIGHTS)
+            raw = _r.get("results", []) if isinstance(_r, dict) else _r
+            if debug and isinstance(_r, dict) and _r.get("denied"):
+                log.info(f"[{name}] 被 deny 過濾的候選 ({len(_r['denied'])} 筆):")
+                for d in _r["denied"][:20]:
+                    log.info(f"        - {d}")
         except Exception as e:
             log.warning(f"[{name}] JS 抓取失敗:{e}")
 
