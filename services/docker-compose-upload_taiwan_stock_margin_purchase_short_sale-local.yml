@@ -1,0 +1,24 @@
+version: '3.0'  # 使用 Docker Compose 的版本 3.0
+# 此為 docker-compose 版本（非 swarm）
+# 與 docker-compose-upload_taiwan_stock_margin_purchase_short_sale.yml 主要差異：
+# 1. 移除 deploy 區塊（deploy 為 swarm 專用，包含 replicas、placement constraints）
+# 2. network 改為 my_network（與 crawler/mysql.yml 共用，方便 upload service 存取 mysql）
+# 啟動前需先建立外部網路：docker network create my_network
+# 啟動指令：docker compose -f docker-compose-upload_taiwan_stock_margin_purchase_short_sale-local.yml up -d
+
+services:
+  upload_taiwan_stock_margin_purchase_short_sale:  # 服務名稱
+    image: linsamtw/tibame_crawler:${DOCKER_IMAGE_VERSION}  # 使用的映像檔名稱與標籤（版本）
+    hostname: "upload_taiwan_stock_margin_purchase_short_sale"
+    command: uv run --env-file=.env python crawler/download_and_upload_taiwan_stock_margin_purchase_short_sale_to_mysql.py
+    restart: on-failure  # 若容器停止或崩潰，自動重新啟動
+    environment:
+      - TZ=Asia/Taipei  # 設定時區為台北（UTC+8）
+    networks:
+      - my_network  # 連接到 my_network，與 mysql 同一個網路
+
+networks:
+  my_network:
+    # 加入已經存在的網路
+    # 需事先執行 docker network create my_network
+    external: true
