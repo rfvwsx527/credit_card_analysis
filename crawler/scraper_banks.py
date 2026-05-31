@@ -1,18 +1,23 @@
 """
 各銀行官網爬蟲 (scraper_banks.py) — Playwright
 ====================================================
-v11 (2026-05)
+v12 (2026-05)
 
-v11 變更:
-1. 中信加強反偵測 + 多 URL 輪試 (APP-1053 系統忙碌錯誤對策)
-2. 動態抓不到時,自動退回精簡 hardcode 並 log 警告
-3. CSV 預設輸出到 ../crawler_data/banks.csv (相對 script),自動建資料夾
+架構:
+1. 中信永遠用 ctbc_cards.csv (因 WAF 防護,動態爬無法穩定取得)
+2. 其他銀行用 Playwright 動態爬,domcontentloaded 等載入
+3. js/href 兩種抓取策略,加 skip 區塊 (nav/header/footer/sidebar)
+4. 詳細頁 fallback:列表頁亮點空時才進詳細頁補
+5. 元大有分頁:用點擊頁碼按鈕逐頁抓
+6. CSV 預設輸出到 ../crawler_data/banks.csv,自動建資料夾
 
 如果輸出 CSV 沒看到「類別」欄,代表 card_common.py 的 COLUMNS 未含
 「類別」字串,請補上即可顯示。
 """
 
 import argparse
+import random
+import re
 import time
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
@@ -28,36 +33,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = SCRIPT_DIR.parent / "crawler_data" / "banks.csv"
 
 
-# 中信動態抓不到時的精簡 fallback 清單 (僅卡名 + URL)
-# 走 _build_record 仍會跑 classify_category 自動補類別
-CTBC_FALLBACK_CARDS = [
-    ("中信LINE Pay卡",      "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/LINEPay/index.html",
-     ["LINE POINTS 最高 16% 回饋", "國內外一般消費 1% 回饋", "國外實體商店消費 2.8% 回饋"]),
-    ("中信ALL ME卡",        "https://mkt.ctbcbank.com/long/creditcard/ALLME_CHT/index.html",
-     ["天天享 3% 回饋", "月月賺 $300", "國外消費 2.2% 無上限"]),
-    ("中信foodpanda聯名卡", "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/foodpanda/index.html",
-     ["foodpanda 點餐享胖達幣回饋", "全站消費最高 10% 胖達幣回饋"]),
-    ("中信和泰聯名卡",      "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/Hotai/index.html",
-     ["iRent / yoxi 享最高 10% 回饋", "和泰集團通路享和泰 Points"]),
-    ("中信中華航空聯名卡",  "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/CTBCCI/index.html",
-     ["國外消費最高 2 元 = 1 哩程", "華航官網購票享優惠"]),
-    ("中信uniopen聯名卡",   "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/uniopen/index.html",
-     ["7-ELEVEN / 統一集團通路最高 8% OPENPOINT", "新戶首刷禮"]),
-    ("中信遠東SOGO聯名卡",  "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/SOGO/index.html",
-     ["SOGO 百貨單筆消費最高 6% 回饋", "週年慶滿額禮"]),
-    ("中信財管鼎鑽卡",      "https://mkt.ctbcbank.com/long/creditcard/WMmember/index.html",
-     ["財富管理會員專屬權益", "機場接送、貴賓室、高爾夫禮遇"]),
-    ("中信商旅鈦金卡",      "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/bussiness/index.html",
-     ["指定通路最高回饋", "新戶首刷享刷卡金"]),
-    ("中信中油聯名卡",      "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/CPC/index.html",
-     ["中油直營站綁定中油 Pay 最高 6.8% 回饋", "新戶最高贈 $300 加油金"]),
-    ("中信Taipei 101聯名卡","https://www.ctbcbank.com/content/dam/minisite/long/creditcard/Taipei101/index.html",
-     ["Taipei 101 樓層消費享回饋", "卡友訂位特權"]),
-    ("中信秀泰聯名卡",      "https://www.ctbcbank.com/content/dam/minisite/long/creditcard/showtime/index.html",
-     ["秀泰影城享電影票優惠", "影城內消費回饋"]),
-    ("中信Agoda聯名卡",     "https://mkt.ctbcbank.com/long/creditcard/agoda/index.html",
-     ["Agoda 訂房享 A 金回饋", "海外消費最高回饋"]),
-]
+# 中信後備清單:由 ctbc_cards.py 讀取 ctbc_cards.csv (直接編輯 CSV 即可)
+try:
+    from ctbc_cards import CTBC_CARDS as CTBC_FALLBACK_CARDS
+except ImportError:
+    CTBC_FALLBACK_CARDS = []
+    log.warning("找不到 ctbc_cards.py,中信後備清單將為空")
 
 
 # ─── 卡名 + 亮點 同步擷取 JS (js 策略用) ─────────────────────────────────────
@@ -65,6 +46,7 @@ CTBC_FALLBACK_CARDS = [
 JS_EXTRACT_CARDS_WITH_HIGHLIGHTS = r"""
 () => {
     // 共用工具
+    // 剝尾端括號補述: ( ) （ ） 【 】 [ ]
     const stripTail = (s) => {
         let t = (s || '').trim();
         for (let i = 0; i < 3; i++) {
@@ -74,9 +56,21 @@ JS_EXTRACT_CARDS_WITH_HIGHLIGHTS = r"""
         }
         return t;
     };
+    // 正規化卡名:剝前後箭頭/符號/多餘空白,給最終輸出與比對用
+    const normalizeName = (s) => {
+        let t = (s || '').replace(/[\u200b\u00a0]/g, ' ').trim();
+        // 剝尾端箭頭 / 符號 / "立即申請" "了解更多" 等
+        t = t.replace(/[\s\u3000>›»▸▶◦・·＞]+$/g, '').trim();
+        t = t.replace(/[\s\u3000]*(立即申請|立即申辦|馬上申辦|了解更多|瞭解更多|更多介紹|查看詳情|詳細介紹|看更多)[\s\u3000]*$/g, '').trim();
+        // 剝尾端「- 已停發 / – 停發 / — 已停售」等狀態說明
+        t = t.replace(/[\s\u3000]*[\-－–—‐][\s\u3000]*(已停發|停發|已停售|停售|已停止|停止申辦|已暫停)[\s\u3000]*$/g, '').trim();
+        // 剝開頭符號 / 箭頭
+        t = t.replace(/^[\s\u3000<‹«◂◀＜]+/g, '').trim();
+        return t;
+    };
     const looksLikeCard = (txt) => {
         if (!txt) return false;
-        const t = txt.trim();
+        let t = normalizeName(txt);
         if (t.length < 3 || t.length > 35) return false;
         if (/[\r\n\t]/.test(t)) return false;
         const core = stripTail(t);
@@ -85,26 +79,68 @@ JS_EXTRACT_CARDS_WITH_HIGHLIGHTS = r"""
     };
     const denyExact = new Set([
         '信用卡','銀行卡','聯名卡','其他卡','所有卡','卡片','一張卡','一卡',
-        '熱門推薦卡','世界卡/無限卡','簽帳金融卡','頂級卡','聯名認同卡',
+        '熱門推薦卡','世界卡/無限卡','簽帳金融卡','聯名認同卡',
         '比較信用卡','所有信用卡','我的卡','熱門卡','聯名/認同卡','分類卡',
         '採購卡','行動支付卡','企業/採購卡','現金儲值卡','停發卡','整併卡',
-        '比較卡','卡卡','卡','旅遊卡','回饋卡','分期卡','信用卡卡',
-        '無限卡','鈦金卡','白金卡','金卡','普卡','虛擬卡','實體卡','數位卡',
+        '比較卡','卡卡','卡','回饋卡','分期卡','信用卡卡',
+        '虛擬卡','實體卡','數位卡','認同卡','學生卡','女性卡',
     ]);
     const denyInclude = [
         '掛失','補發','辦卡進度','卡片管理','繳款','帳單','信用卡服務',
         '常見問題','卡別','分類標籤','線上辦卡','請選擇您想要的服務',
-        '更多介紹','立即申辦','瞭解更多','了解更多','禮遇專區',
+        '更多介紹','立即申辦','瞭解更多','了解更多','禮遇專區','立即辦卡',
         '卡片總覽','尋找適合','信用卡介紹',
+        // 區塊標題語 (會以「卡」結尾但其實是標題,需排除)
+        '申請','推薦的信用卡','最受歡迎','受歡迎的信用卡','精選','嚴選',
+        '為您推薦','幫您篩選','適合您的','選擇您','哪一張','哪張',
+        '比較信用卡','信用卡比較','所有信用卡','全部信用卡','探索',
+        // 升級/併入說明文字 (國泰常見)
+        '已於','並於','升級為','更名為','併入','整併為','改名為',
+        // 圖檔/規格殘留
+        'Icon/','70x70','px ','px,','px、',
     ];
     const inlineTags = new Set([
         'STRONG','EM','SPAN','I','B','U','BR','SMALL','SUB','SUP','MARK','FONT'
     ]);
-    const featRegex = /[％%]|回饋|優惠|紅利|哩程|加碼|首刷|贈|累積|享|點數|分期|無限|新戶|機場|貴賓|現金|消費|刷卡|滿額|無上限/;
+    const featRegex = /[％%]|回饋|優惠|紅利|哩程|哩|加碼|首刷|贈|累積|享|點數|分期|無限|新戶|機場|貴賓|現金|消費|刷卡|滿額|無上限|停車|接送|禮遇|免費|權益|保險|折抵|回贈|年費|道路救援|分期0利率|0利率/;
 
     // 階段 1: 找所有卡名葉子節點 (+ img alt)
+    // 找出要排除的根節點 (nav/header/footer/sidebar 等),避免把選單文字當卡名/亮點
+    // 跳過導覽/側邊/頁尾根節點,避免選單文字被當卡名/亮點。
+    // 用精準 token 比對 (class~="nav"),避免誤殺 "card-navigation"/"navbar-cards" 等含卡片內容的容器。
+    const skipSelectors = [
+        'nav', 'header', 'footer', 'aside',
+        '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+        // class 整個 token 等於這些 (空白分隔)
+        '[class~="nav"]', '[class~="menu"]', '[class~="sidebar"]', '[class~="header"]',
+        '[class~="footer"]', '[class~="breadcrumb"]', '[class~="breadcrumbs"]',
+        '[class~="navbar"]', '[class~="navigation"]', '[class~="side-nav"]',
+        '[class~="main-nav"]', '[class~="top-nav"]', '[class~="global-nav"]',
+        '[class~="sub-nav"]', '[class~="subnav"]', '[class~="submenu"]',
+        '[class~="left-nav"]', '[class~="right-nav"]', '[class~="page-nav"]',
+        '[class~="category-nav"]', '[class~="category-menu"]', '[class~="category-list"]',
+        '[class~="page-menu"]', '[class~="local-nav"]',
+        '[class~="cookie-banner"]', '[class~="cookie-notice"]',
+        '[id="nav"]', '[id="menu"]', '[id="sidebar"]', '[id="header"]', '[id="footer"]',
+        '[id="navbar"]', '[id="navigation"]', '[id="breadcrumb"]',
+        '[id~="sidebar"]', '[id~="leftnav"]', '[id~="rightnav"]',
+    ];
+    const skipRoots = new Set();
+    for (const sel of skipSelectors) {
+        try { for (const el of document.querySelectorAll(sel)) skipRoots.add(el); } catch (e) {}
+    }
+    const isInSkip = (el) => {
+        let n = el;
+        while (n) {
+            if (skipRoots.has(n)) return true;
+            n = n.parentElement;
+        }
+        return false;
+    };
+
     const cardEls = [];
     for (const el of document.querySelectorAll('*')) {
+        if (isInSkip(el)) continue;   // 跳過導覽/側邊/頁尾區內的元素
         let containerLike = false;
         for (const c of el.children) {
             const ct = (c.textContent || '').trim();
@@ -114,16 +150,19 @@ JS_EXTRACT_CARDS_WITH_HIGHLIGHTS = r"""
             }
         }
         if (containerLike) continue;
-        const txt = ((el.innerText || el.textContent || '') + '').trim();
-        if (!looksLikeCard(txt)) continue;
+        const rawTxt = ((el.innerText || el.textContent || '') + '').trim();
+        if (!looksLikeCard(rawTxt)) continue;
+        const txt = normalizeName(rawTxt);
         if (denyExact.has(txt)) continue;
         if (denyInclude.some(k => txt.includes(k))) continue;
         if ((txt.match(/[、，。！？:：；]/g) || []).length >= 2) continue;
         cardEls.push({el, name: txt});
     }
     for (const img of document.querySelectorAll('img[alt]')) {
-        const alt = (img.alt || '').trim();
-        if (!looksLikeCard(alt)) continue;
+        if (isInSkip(img)) continue;
+        const rawAlt = (img.alt || '').trim();
+        if (!looksLikeCard(rawAlt)) continue;
+        const alt = normalizeName(rawAlt);
         if (denyExact.has(alt)) continue;
         if (denyInclude.some(k => alt.includes(k))) continue;
         cardEls.push({el: img, name: alt});
@@ -150,7 +189,7 @@ JS_EXTRACT_CARDS_WITH_HIGHLIGHTS = r"""
             let hasOther = false;
             for (const e of parent.querySelectorAll('*')) {
                 if (e === card.el) continue;
-                const t = ((e.innerText || e.textContent || '') + '').trim();
+                const t = normalizeName(((e.innerText || e.textContent || '') + '').trim());
                 if (t !== card.name && allNames.has(t)) { hasOther = true; break; }
             }
             if (hasOther) break;
@@ -163,17 +202,19 @@ JS_EXTRACT_CARDS_WITH_HIGHLIGHTS = r"""
         const seenHl = new Set();
         const tryAdd = (raw) => {
             if (!raw) return;
-            const clean = raw.trim();
+            // 換行/多空白 → 單一空格 (不再因含換行整條丟棄)
+            let clean = (raw + '').replace(/\s+/g, ' ').trim();
             if (!clean || clean === card.name) return;
+            if (normalizeName(clean) === card.name) return;
             if (seenHl.has(clean)) return;
             if (clean.length < 4 || clean.length > 80) return;
-            if (/[\r\n\t]/.test(clean)) return;
-            if (allNames.has(clean)) return;
+            if (allNames.has(normalizeName(clean))) return;
+            if (/^(了解更多|更多介紹|立即申辦|立即申請|詳細介紹|看更多|前往|查看)/.test(clean)) return;
             seenHl.add(clean);
             highlights.push(clean);
         };
 
-        // 優先取 <li> (官網最常見的 bullet 結構)
+        // 來源 1: <li> bullet
         for (const li of container.querySelectorAll('li')) {
             if (highlights.length >= 6) break;
             let hasChildList = false;
@@ -181,21 +222,21 @@ JS_EXTRACT_CARDS_WITH_HIGHLIGHTS = r"""
                 if (c.tagName === 'UL' || c.tagName === 'OL') { hasChildList = true; break; }
             }
             if (hasChildList) continue;
-            tryAdd(((li.innerText || li.textContent || '') + '').trim());
+            tryAdd(li.innerText || li.textContent || '');
         }
 
-        // 補充: 含特徵詞的 <p>/<span>/<div> 葉節點
+        // 來源 2: 含特徵詞的 <p>/<span>/<div>/<dd>/<td> 葉節點 (允許含 <br>)
         if (highlights.length < 3) {
-            for (const el of container.querySelectorAll('p, span, div')) {
+            for (const el of container.querySelectorAll('p, span, div, dd, td')) {
                 if (highlights.length >= 6) break;
                 let hasBlockChild = false;
                 for (const c of el.children) {
-                    if (inlineTags.has(c.tagName)) continue;
+                    if (inlineTags.has(c.tagName) || c.tagName === 'BR') continue;
                     const ct = (c.textContent || '').trim();
                     if (ct) { hasBlockChild = true; break; }
                 }
                 if (hasBlockChild) continue;
-                const t = ((el.innerText || el.textContent || '') + '').trim();
+                const t = ((el.innerText || el.textContent || '') + '').replace(/\s+/g, ' ').trim();
                 if (!featRegex.test(t)) continue;
                 tryAdd(t);
             }
@@ -226,9 +267,18 @@ JS_EXTRACT_HREFS_WITH_HIGHLIGHTS = r"""
         }
         return t;
     };
+    const normalizeName = (s) => {
+        let t = (s || '').replace(/[\u200b\u00a0]/g, ' ').trim();
+        t = t.replace(/[\s\u3000>›»▸▶◦・·＞]+$/g, '').trim();
+        t = t.replace(/[\s\u3000]*(立即申請|立即申辦|馬上申辦|了解更多|瞭解更多|更多介紹|查看詳情|詳細介紹|看更多)[\s\u3000]*$/g, '').trim();
+        // 剝尾端「- 已停發 / – 停發 / — 已停售」等狀態說明
+        t = t.replace(/[\s\u3000]*[\-－–—‐][\s\u3000]*(已停發|停發|已停售|停售|已停止|停止申辦|已暫停)[\s\u3000]*$/g, '').trim();
+        t = t.replace(/^[\s\u3000<‹«◂◀＜]+/g, '').trim();
+        return t;
+    };
     const looksLikeCard = (txt) => {
         if (!txt) return false;
-        const t = txt.trim();
+        let t = normalizeName(txt);
         if (t.length < 3 || t.length > 35) return false;
         if (/[\r\n\t]/.test(t)) return false;
         const core = stripTail(t);
@@ -240,16 +290,61 @@ JS_EXTRACT_HREFS_WITH_HIGHLIGHTS = r"""
         '熱門推薦卡','世界卡/無限卡','簽帳金融卡','頂級卡','聯名認同卡',
         '比較信用卡','所有信用卡','我的卡','熱門卡','聯名/認同卡','停發卡',
         '採購卡','卡卡','卡','無限卡','鈦金卡','白金卡','金卡','普卡',
+        '現金回饋卡','哩程卡','一般卡','御璽卡','晶緻卡','世界卡','商務卡',
+        '認同卡','銀行卡','悠遊卡','一卡通',
     ]);
+    const denyInclude = [
+        '掛失','補發','辦卡進度','卡片管理','繳款','帳單','信用卡服務',
+        '常見問題','卡別','線上辦卡','更多介紹','立即申辦','瞭解更多','了解更多','立即辦卡',
+        '申請我們','最受歡迎','受歡迎的信用卡','推薦的信用卡','信用卡比較',
+        // 升級/併入說明文字
+        '已於','並於','升級為','更名為','併入','整併為','改名為',
+        // 圖檔/規格殘留
+        'Icon/','70x70','px ','px,','px、',
+    ];
     const inlineTags = new Set([
         'STRONG','EM','SPAN','I','B','U','BR','SMALL','SUB','SUP','MARK','FONT'
     ]);
-    const featRegex = /[％%]|回饋|優惠|紅利|哩程|加碼|首刷|贈|累積|享|點數|分期|無限|新戶|機場|貴賓|現金|消費|刷卡|滿額|無上限/;
+    const featRegex = /[％%]|回饋|優惠|紅利|哩程|哩|加碼|首刷|贈|累積|享|點數|分期|無限|新戶|機場|貴賓|現金|消費|刷卡|滿額|無上限|停車|接送|禮遇|免費|權益|保險|折抵|回贈|年費|道路救援|分期0利率|0利率/;
+
+    // 跳過 nav/header/footer/sidebar (元大左側選單有 "所有卡片"/"頂級卡" 等假連結會誤判)
+    // 跳過導覽/側邊/頁尾根節點,避免選單文字被當卡名/亮點。
+    // 用精準 token 比對 (class~="nav"),避免誤殺 "card-navigation"/"navbar-cards" 等含卡片內容的容器。
+    const skipSelectors = [
+        'nav', 'header', 'footer', 'aside',
+        '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+        // class 整個 token 等於這些 (空白分隔)
+        '[class~="nav"]', '[class~="menu"]', '[class~="sidebar"]', '[class~="header"]',
+        '[class~="footer"]', '[class~="breadcrumb"]', '[class~="breadcrumbs"]',
+        '[class~="navbar"]', '[class~="navigation"]', '[class~="side-nav"]',
+        '[class~="main-nav"]', '[class~="top-nav"]', '[class~="global-nav"]',
+        '[class~="sub-nav"]', '[class~="subnav"]', '[class~="submenu"]',
+        '[class~="left-nav"]', '[class~="right-nav"]', '[class~="page-nav"]',
+        '[class~="category-nav"]', '[class~="category-menu"]', '[class~="category-list"]',
+        '[class~="page-menu"]', '[class~="local-nav"]',
+        '[class~="cookie-banner"]', '[class~="cookie-notice"]',
+        '[id="nav"]', '[id="menu"]', '[id="sidebar"]', '[id="header"]', '[id="footer"]',
+        '[id="navbar"]', '[id="navigation"]', '[id="breadcrumb"]',
+        '[id~="sidebar"]', '[id~="leftnav"]', '[id~="rightnav"]',
+    ];
+    const skipRoots = new Set();
+    for (const sel of skipSelectors) {
+        try { for (const el of document.querySelectorAll(sel)) skipRoots.add(el); } catch (e) {}
+    }
+    const isInSkip = (el) => {
+        let n = el;
+        while (n) {
+            if (skipRoots.has(n)) return true;
+            n = n.parentElement;
+        }
+        return false;
+    };
 
     const candidates = [];
     for (const a of document.querySelectorAll('a[href]')) {
         const href = a.getAttribute('href') || '';
         if (!href.includes(hrefPart)) continue;
+        if (isInSkip(a)) continue;
 
         const texts = [];
         const at = ((a.innerText || a.textContent || '') + '').trim();
@@ -276,7 +371,12 @@ JS_EXTRACT_HREFS_WITH_HIGHLIGHTS = r"""
 
         let name = null;
         for (const t of texts) {
-            if (looksLikeCard(t) && !denyExact.has(t)) { name = t; break; }
+            if (!looksLikeCard(t)) continue;
+            const nm = normalizeName(t);
+            if (denyExact.has(nm)) continue;
+            if (denyInclude.some(k => nm.includes(k))) continue;
+            name = nm;
+            break;
         }
         if (!name) continue;
         candidates.push({a, name});
@@ -299,7 +399,7 @@ JS_EXTRACT_HREFS_WITH_HIGHLIGHTS = r"""
         while (parent && depth < 8) {
             let hasOther = false;
             for (const e of parent.querySelectorAll('*')) {
-                const t = ((e.innerText || e.textContent || '') + '').trim();
+                const t = normalizeName(((e.innerText || e.textContent || '') + '').trim());
                 if (t !== card.name && allNames.has(t)) { hasOther = true; break; }
             }
             if (hasOther) break;
@@ -312,12 +412,13 @@ JS_EXTRACT_HREFS_WITH_HIGHLIGHTS = r"""
         const seenHl = new Set();
         const tryAdd = (raw) => {
             if (!raw) return;
-            const clean = raw.trim();
+            let clean = (raw + '').replace(/\s+/g, ' ').trim();
             if (!clean || clean === card.name) return;
+            if (normalizeName(clean) === card.name) return;
             if (seenHl.has(clean)) return;
             if (clean.length < 4 || clean.length > 80) return;
-            if (/[\r\n\t]/.test(clean)) return;
-            if (allNames.has(clean)) return;
+            if (allNames.has(normalizeName(clean))) return;
+            if (/^(了解更多|更多介紹|立即申辦|立即申請|詳細介紹|看更多|前往|查看)/.test(clean)) return;
             seenHl.add(clean);
             highlights.push(clean);
         };
@@ -329,19 +430,19 @@ JS_EXTRACT_HREFS_WITH_HIGHLIGHTS = r"""
                 if (c.tagName === 'UL' || c.tagName === 'OL') { hasChildList = true; break; }
             }
             if (hasChildList) continue;
-            tryAdd(((li.innerText || li.textContent || '') + '').trim());
+            tryAdd(li.innerText || li.textContent || '');
         }
         if (highlights.length < 3) {
-            for (const el of container.querySelectorAll('p, span, div')) {
+            for (const el of container.querySelectorAll('p, span, div, dd, td')) {
                 if (highlights.length >= 6) break;
                 let hasBlockChild = false;
                 for (const c of el.children) {
-                    if (inlineTags.has(c.tagName)) continue;
+                    if (inlineTags.has(c.tagName) || c.tagName === 'BR') continue;
                     const ct = (c.textContent || '').trim();
                     if (ct) { hasBlockChild = true; break; }
                 }
                 if (hasBlockChild) continue;
-                const t = ((el.innerText || el.textContent || '') + '').trim();
+                const t = ((el.innerText || el.textContent || '') + '').replace(/\s+/g, ' ').trim();
                 if (!featRegex.test(t)) continue;
                 tryAdd(t);
             }
@@ -360,13 +461,15 @@ JS_EXTRACT_HREFS_WITH_HIGHLIGHTS = r"""
 
 # ─── 類別分類 (Python) ──────────────────────────────────────────────────────
 
-import re as _re_for_classify
-_PCT_FEEDBACK_RE = _re_for_classify.compile(r'[%％]\s*回饋')
+_PCT_FEEDBACK_RE = re.compile(r'[%％]\s*回饋')
 
 
 def classify_category(card_name: str, highlights: list[str]) -> str:
     """根據卡名 + 亮點 keyword 對應到類別"""
     name = card_name or ''
+    # 剝除尾端括號補述 (邀請制)/(停發)/【已停發】 等,供結尾比對用
+    name_core = re.sub(
+        r'[\s\u3000]*[\(（【\[][^\)）】\]]{0,30}[\)）】\]][\s\u3000]*$', '', name).strip()
     text = name + ' ' + ' '.join(highlights or [])
     nlow = name.lower()
 
@@ -376,12 +479,12 @@ def classify_category(card_name: str, highlights: list[str]) -> str:
     if 'debit' in nlow:
         return '簽帳金融卡'
 
-    # 頂級卡:結尾「無限卡」+ 鼎極/世界至尊 等
+    # 頂級卡:結尾「無限卡」(剝括號後) + 鼎極/世界至尊 等
     if any(k in name for k in ['鼎極', '世界之極', '世界至尊', '無限世界', '極致', '尊榮無限']):
         return '頂級卡'
     if 'infinite' in nlow:
         return '頂級卡'
-    if name.endswith('無限卡') and name not in ('無限卡',):
+    if name_core.endswith('無限卡') and name_core != '無限卡':
         return '頂級卡'
 
     # 哩程 (卡名提到航空、哩程相關)
@@ -431,20 +534,6 @@ def classify_category(card_name: str, highlights: list[str]) -> str:
 # 中信納入 BANK_CONFIGS,移除原本的 hardcode 路徑
 
 BANK_CONFIGS = {
-    "ctbc": {
-        # 中信:嘗試多個入口,避免某一個 URL 觸發 APP-1053
-        "name": "中國信託銀行",
-        "url": "https://www.ctbcbank.com/twrbo/zh_tw/cc_index/cc_product/cc_introduction_index.html",
-        "fallback_urls": [
-            "https://www.ctbcbank.com/content/twrbo/zh_tw/cc_index/cc_product/cc_introduction_index.html",
-            "https://www.ctbcbank.com/twrbo/zh_tw/cc_index/cc_product/cc_hot.html",
-            "https://www.ctbcbank.com/content/twrbo/zh_tw/cc_index/cc_product/cc_hot.html",
-        ],
-        "referer": "https://www.ctbcbank.com/twrbo/zh_tw/index.html",
-        "wait_for": "body",
-        "strategy": "js",
-        "fallback_hardcode": "ctbc",  # 動態抓 0 筆時退回 hardcode
-    },
     "esun": {
         "name": "玉山銀行",
         "url": "https://www.esunbank.com/zh-tw/personal/credit-card/intro",
@@ -474,15 +563,30 @@ BANK_CONFIGS = {
         "url": "https://bank.sinopac.com/sinopacBT/personal/credit-card/introduction/list.html",
         "wait_for": "body",
         "strategy": "js",
+        "detail_fallback": True,   # 列表頁亮點空的卡,進詳細頁補抓
+        "detail_limit": 40,
     },
     "yuanta": {
-        # 元大正確路徑:雙層 creditCard
+        # 元大:list.do 卡片清單為 AJAX 動態載入,需等 in.do 連結出現
+        # 卡片詳細頁 pattern: /bank/creditCard/creditCard/in.do?id=XXX
+        # 有分頁 (1/2/3/4),先試 click 頁碼,失敗則改 URL 分頁
         "name": "元大銀行",
         "url": "https://www.yuantabank.com.tw/bank/creditCard/creditCard/list.do",
-        "fallback_url": "https://www.yuantabank.com.tw/bank/creditCard/index.do",
-        "wait_for": "body",
+        "fallback_urls": [
+            "https://www.yuantabank.com.tw/bank/creditCard/creditCard/list.do?creditcard_type=1",
+            "https://www.yuantabank.com.tw/bank/creditCard/index.do",
+        ],
+        "wait_for": "a[href*='/creditCard/in.do']",
+        "wait_for_optional": True,
         "strategy": "href",
         "href_part": "/creditCard/in.do",
+        "paginate": True,
+        "max_pages": 6,
+        # URL 分頁 fallback:當 click 失敗時,改用 URL 直接導航
+        # {p} 會被換成頁碼。元大常見參數名:currentPage、p、pageNo
+        "paginate_url_template": "https://www.yuantabank.com.tw/bank/creditCard/creditCard/list.do?currentPage={p}",
+        "detail_fallback": True,
+        "detail_limit": 60,
     },
     "kgi": {
         "name": "凱基銀行",
@@ -512,8 +616,15 @@ BANK_CONFIGS = {
 }
 
 
+def _is_discontinued(card_name: str, highlights: list[str]) -> bool:
+    """判斷是否為停發卡 (卡名或亮點含停發字樣)"""
+    text = (card_name or '') + ' ' + ' '.join(highlights or [])
+    return any(k in text for k in ['停發', '已停止', '停止申辦', '停止發卡', '已停售', '停售'])
+
+
 def _build_record(*, bank_name, bank_code, card_name, highlights, apply_url, source):
-    """make_record 包裝:追加類別欄。COLUMNS 若沒有「類別」會被丟棄,需自行補。"""
+    """make_record 包裝:追加「類別」「狀態」欄。
+    COLUMNS 若沒有這兩欄會被 save_csv 丟棄,需在 card_common.py 補上。"""
     rec = make_record(
         bank_name=bank_name, bank_code=bank_code,
         card_name=card_name, highlights=highlights,
@@ -521,6 +632,7 @@ def _build_record(*, bank_name, bank_code, card_name, highlights, apply_url, sou
     )
     if isinstance(rec, dict):
         rec['類別'] = classify_category(card_name, highlights)
+        rec['狀態'] = '停發' if _is_discontinued(card_name, highlights) else '發行中'
     return rec
 
 
@@ -535,24 +647,29 @@ def _ctbc_fallback_records(name: str, code: str) -> list[dict]:
     return records
 
 
-def _looks_like_error_page(page) -> bool:
-    """偵測中信 APP-1053 / 系統忙碌 / 503 等錯誤頁"""
+def _human_pause(page, lo=1000, hi=2500):
+    """隨機停頓,模擬人類閱讀"""
     try:
-        text = page.evaluate(
-            "() => (document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 500)"
-        )
+        page.wait_for_timeout(random.randint(lo, hi))
     except Exception:
-        return False
-    if not text:
-        return False
-    markers = ['APP-1053', '系統忙碌', '系統繁忙', '請稍後再試',
-               '503 Service', 'Service Unavailable', '網頁暫無法顯示']
-    return any(m in text for m in markers)
+        pass
+
+
+def _human_mouse(page):
+    """隨機滑鼠移動,降低行為指紋"""
+    try:
+        for _ in range(random.randint(2, 4)):
+            x = random.randint(100, 1300)
+            y = random.randint(100, 800)
+            page.mouse.move(x, y, steps=random.randint(3, 8))
+            page.wait_for_timeout(random.randint(120, 400))
+    except Exception:
+        pass
 
 
 def scrape_bank(page, code: str, cfg: dict, debug: bool = False) -> list[dict]:
     name = cfg["name"]
-    # 蒐集所有要嘗試的 URL (支援單 fallback_url 與 list fallback_urls 兩種設定)
+    # 蒐集所有要嘗試的 URL
     urls = [cfg["url"]]
     if "fallback_url" in cfg:
         urls.append(cfg["fallback_url"])
@@ -562,55 +679,69 @@ def scrape_bank(page, code: str, cfg: dict, debug: bool = False) -> list[dict]:
     referer = cfg.get("referer")
 
     soup_url = None
+    wait_sel = cfg.get("wait_for", "body")
+    wait_optional = cfg.get("wait_for_optional", False)
+
     for url in urls:
         log.info(f"開始爬取:{name}({url})")
-        nav_kwargs = {"timeout": 60000, "wait_until": "networkidle"}
+        # 用 domcontentloaded:銀行頁有大量追蹤碼/廣告/lazy-load,永遠到不了 networkidle,
+        # DOM 載完就先抓,真正要等的東西交給後面的 wait_for_selector + scroll。
+        nav_kwargs = {"timeout": 30000, "wait_until": "domcontentloaded"}
         if referer:
             nav_kwargs["referer"] = referer
         try:
             page.goto(url, **nav_kwargs)
         except PWTimeout:
-            log.warning(f"[{name}] networkidle 逾時,改 domcontentloaded")
-            try:
-                page.goto(url, timeout=40000, wait_until="domcontentloaded",
-                          **({"referer": referer} if referer else {}))
-                try:
-                    page.wait_for_selector(cfg["wait_for"], timeout=12000)
-                except PWTimeout:
-                    pass
-            except Exception as e:
-                log.warning(f"[{name}] 載入失敗:{e}")
-                continue
+            log.warning(f"[{name}] domcontentloaded 逾時")
+            continue
         except Exception as e:
             log.warning(f"[{name}] 載入失敗:{e}")
             continue
 
-        # 偵測錯誤頁,若是 → 試下一個 URL
-        page.wait_for_timeout(1500)
-        if _looks_like_error_page(page):
-            log.warning(f"[{name}] 偵測到錯誤頁 (APP-1053/系統忙碌),改試下一個 URL")
-            continue
+        # 人類化:停頓 + 滑鼠移動,順便給 JS 一點時間執行
+        _human_pause(page, 1500, 2800)
+        _human_mouse(page)
 
+        # 等待目標 selector
+        if wait_sel and wait_sel != "body":
+            try:
+                page.wait_for_selector(wait_sel, timeout=15000)
+                log.debug(f"[{name}] 等到 selector: {wait_sel}")
+            except PWTimeout:
+                if not wait_optional:
+                    log.warning(f"[{name}] 等不到 {wait_sel}")
+
+        page.wait_for_timeout(1000)
         soup_url = url
         break
 
     if not soup_url:
-        log.error(f"[{name}] 所有 URL 失敗或皆回錯誤頁")
-        # 中信:全部 URL 都失敗 → hardcode 後備
-        if cfg.get("fallback_hardcode") == "ctbc":
-            log.warning(f"[{name}] 改用 hardcode 後備清單 ({len(CTBC_FALLBACK_CARDS)} 張)")
-            return _ctbc_fallback_records(name, code)
+        log.error(f"[{name}] 所有 URL 載入失敗")
         return []
 
     _scroll_to_bottom(page)
-    page.wait_for_timeout(2500)
+    page.wait_for_timeout(1500)
 
     if debug:
-        page.screenshot(path=f"debug_{code}.png", full_page=True)
-        log.info(f"[{name}] 截圖:debug_{code}.png")
+        try:
+            # 短 timeout + 不等字型 (animations=disabled 順便加快)
+            page.screenshot(path=f"debug_{code}.png", full_page=True,
+                            timeout=15000, animations="disabled")
+            log.info(f"[{name}] 截圖:debug_{code}.png")
+        except Exception as e:
+            # full_page 失敗常見原因:字型 CDN 慢、頁面過長。改截 viewport 救一下
+            log.warning(f"[{name}] full_page 截圖失敗 ({e.__class__.__name__}),改截可視範圍")
+            try:
+                page.screenshot(path=f"debug_{code}.png",
+                                timeout=10000, animations="disabled")
+                log.info(f"[{name}] 截圖 (viewport):debug_{code}.png")
+            except Exception as e2:
+                log.warning(f"[{name}] viewport 截圖也失敗,略過:{e2.__class__.__name__}")
 
     strategy = cfg.get("strategy", "js")
     raw = []
+    paginate = cfg.get("paginate", False)
+    max_pages = cfg.get("max_pages", 6)
 
     if strategy == "href":
         href_part = cfg.get("href_part", "")
@@ -618,6 +749,61 @@ def scrape_bank(page, code: str, cfg: dict, debug: bool = False) -> list[dict]:
             raw = page.evaluate(JS_EXTRACT_HREFS_WITH_HIGHLIGHTS, href_part)
         except Exception as e:
             log.warning(f"[{name}] JS href 抓取失敗:{e}")
+        # 分頁:先試 click,失敗試 URL 分頁
+        if paginate:
+            seen_hrefs = {r.get("href") for r in raw}
+            url_template = cfg.get("paginate_url_template")  # 含 {p} 的 URL
+            # 元大常見參數名,如果 cfg 給的 template 不行,試這些
+            url_param_names = ["currentPage", "page", "p", "pageNo", "pageIndex"]
+            for pg in range(2, max_pages + 1):
+                page_loaded = False
+                # 策略 A: click 頁碼按鈕
+                if _click_page_number(page, pg, name):
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=8000)
+                    except PWTimeout:
+                        pass
+                    page.wait_for_timeout(2500)
+                    page_loaded = True
+                # 策略 B: URL 分頁(click 失敗時試)
+                if not page_loaded:
+                    candidate_urls = []
+                    if url_template and "{p}" in url_template:
+                        candidate_urls.append(url_template.replace("{p}", str(pg)))
+                    # 從目前 url 衍生:基底 url + 不同參數名
+                    base = soup_url.split("?")[0]
+                    for pname in url_param_names:
+                        candidate_urls.append(f"{base}?{pname}={pg}")
+                    for cand in candidate_urls:
+                        try:
+                            page.goto(cand, timeout=20000, wait_until="domcontentloaded")
+                            page.wait_for_timeout(2000)
+                            page_loaded = True
+                            log.debug(f"[{name}] URL 分頁到第 {pg} 頁:{cand}")
+                            break
+                        except Exception:
+                            continue
+                if not page_loaded:
+                    log.debug(f"[{name}] 第 {pg} 頁無法載入 (click/URL 皆失敗),結束分頁")
+                    break
+
+                _scroll_to_bottom(page, steps=5)
+                try:
+                    page_raw = page.evaluate(JS_EXTRACT_HREFS_WITH_HIGHLIGHTS, href_part)
+                except Exception as e:
+                    log.warning(f"[{name}] 第 {pg} 頁抓取失敗:{e}")
+                    continue
+                added = 0
+                for r in page_raw:
+                    h = r.get("href")
+                    if h and h not in seen_hrefs:
+                        seen_hrefs.add(h)
+                        raw.append(r)
+                        added += 1
+                log.info(f"[{name}] 第 {pg} 頁新增 {added} 張 (累計 {len(raw)})")
+                if added == 0:
+                    log.debug(f"[{name}] 第 {pg} 頁無新卡,結束分頁")
+                    break
         if not raw:
             log.warning(f"[{name}] href 策略未取得卡名,回退 js")
             try:
@@ -646,22 +832,263 @@ def scrape_bank(page, code: str, cfg: dict, debug: bool = False) -> list[dict]:
             by_name[r["text"]] = r
 
     records = []
+    metas = []  # 與 records 對齊:(card_name, href, highlights)
     for cn in valid_names:
         r = by_name.get(cn, {})
+        hl = r.get("highlights", []) or []
+        href = r.get("href") or soup_url
         records.append(_build_record(
             bank_name=name, bank_code=code, card_name=cn,
-            highlights=r.get("highlights", []) or [],
-            apply_url=r.get("href") or soup_url,
-            source=soup_url,
+            highlights=hl, apply_url=href, source=soup_url,
         ))
+        metas.append({"card_name": cn, "href": href, "highlights": hl})
 
-    # 中信動態抓 0 筆 → hardcode 後備
-    if not records and cfg.get("fallback_hardcode") == "ctbc":
-        log.warning(f"[{name}] 動態 0 筆,改用 hardcode 後備清單")
-        return _ctbc_fallback_records(name, code)
+    # 詳細頁 fallback:列表頁抓不到亮點 (空) 的卡,且設定允許時,進詳細頁補抓
+    if cfg.get("detail_fallback"):
+        _fill_highlights_from_detail(
+            page, name, code, records, metas, soup_url, cfg)
 
     log.info(f"  ✅ {name}:{len(records)} 張(JS回傳 {len(raw)} → 有效 {len(records)})")
     return records
+
+
+# 詳細頁抓亮點:掃整頁找含特徵詞的 li / 短文字節點 (通用,不依賴特定 class)
+JS_EXTRACT_DETAIL_HIGHLIGHTS = r"""
+() => {
+    const featRegex = /[％%]|回饋|優惠|紅利|哩程|哩|加碼|首刷|贈|累積|享|點數|分期|無限|新戶|機場|貴賓|現金|消費|刷卡|滿額|無上限|停車|接送|禮遇|免費|權益|保險|折抵|回贈|道路救援/;
+    // 強過濾:導覽/服務性詞,常出現於 menu/sidebar
+    const navWords = /常見問題|聯絡|據點|登入|分行|ATM|信用卡服務|信用卡介紹|卡片總覽|信用卡查詢|卡友權益|活動專區|線上申辦|卡片管理|帳單查詢|繳款|掛失|補發|個人服務|數位金融|中小企業|法人企業|信託服務|永續|關於|搜尋|英文|EN|集團|新聞|採購|招募|職涯|徵才|匯率|利率|存款|外匯|貸款|保險|理財|投資|加密|防詐|隱私|宣告|聲明|措施|條款|公告|法定|揭露|消費者保護|友善|無障礙|連結|導覽|協助|交通類權益|國外旅遊|服務與條款|其他權益|點數專區|鑽金會員|現金儲值卡|簽帳金融卡|聯名認同卡|企業.採購卡|行動支付卡|所有卡片|頂級卡|銀行卡|熱門卡|活動優惠及公告|定型化契約|收費標準|分類標籤|個人金融|法人金融|紅利折抵特店|紅利兌換服務|紅利兌換|優惠商店|分期特店|優惠活動|商品優惠|信用卡理財|信用卡產品/;
+    const inlineTags = new Set(['STRONG','EM','SPAN','I','B','U','BR','SMALL','SUB','SUP','MARK','FONT']);
+
+    // 跳過導覽/側邊/頁尾根節點 (精準 token 比對,避免誤殺含卡片的容器)
+    const skipSelectors = [
+        'nav', 'header', 'footer', 'aside',
+        '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]',
+        // class 整個 token 等於這些 (空白分隔)
+        '[class~="nav"]', '[class~="menu"]', '[class~="sidebar"]', '[class~="header"]',
+        '[class~="footer"]', '[class~="breadcrumb"]', '[class~="breadcrumbs"]',
+        '[class~="navbar"]', '[class~="navigation"]', '[class~="side-nav"]',
+        '[class~="main-nav"]', '[class~="top-nav"]', '[class~="global-nav"]',
+        '[class~="sub-nav"]', '[class~="subnav"]', '[class~="submenu"]',
+        '[class~="left-nav"]', '[class~="right-nav"]', '[class~="page-nav"]',
+        '[class~="category-nav"]', '[class~="category-menu"]', '[class~="category-list"]',
+        '[class~="page-menu"]', '[class~="local-nav"]',
+        '[class~="cookie-banner"]', '[class~="cookie-notice"]',
+        '[id="nav"]', '[id="menu"]', '[id="sidebar"]', '[id="header"]', '[id="footer"]',
+        '[id="navbar"]', '[id="navigation"]', '[id="breadcrumb"]',
+        '[id~="sidebar"]', '[id~="leftnav"]', '[id~="rightnav"]',
+    ];
+    const skipRoots = new Set();
+    for (const sel of skipSelectors) {
+        try {
+            for (const el of document.querySelectorAll(sel)) skipRoots.add(el);
+        } catch (e) {}
+    }
+    // 給定節點是否在任何 skipRoot 內 (含自身)
+    const isInSkip = (el) => {
+        let n = el;
+        while (n) {
+            if (skipRoots.has(n)) return true;
+            n = n.parentElement;
+        }
+        return false;
+    };
+
+    // 鎖定主內容容器:優先 <main>/[role=main]/.content/.main,沒有就用 body
+    let root = document.querySelector('main, [role="main"], .main-content, #main-content, .content-main, .product-detail, .credit-card-detail');
+    if (!root) root = document.body;
+    if (!root) return [];
+
+    const out = [];
+    const seen = new Set();
+    const add = (raw) => {
+        if (out.length >= 6) return;
+        let t = (raw + '').replace(/\s+/g, ' ').trim();
+        if (!t || t.length < 5 || t.length > 90) return;
+        if (seen.has(t)) return;
+        if (!featRegex.test(t)) return;
+        if (navWords.test(t)) return;
+        if (/^(了解更多|更多|立即申辦|立即申請|詳細|看更多|前往|查看|注意事項|適用對象|申辦條件|相關)/.test(t)) return;
+        // 排除過多分隔符的句子 (通常是選單列)
+        if ((t.match(/[、，。;]/g) || []).length >= 4) return;
+        // 短文 (<=8字) 且完全沒標點/數字/英文 → 八成是選單項目 (如「紅利折抵特店」)
+        const hasMark = /[、，。：；！？\d%％()（）「」『』+\-\/]/.test(t);
+        const hasEnglish = /[a-zA-Z]/.test(t);
+        if (t.length <= 8 && !hasMark && !hasEnglish) return;
+        seen.add(t);
+        out.push(t);
+    };
+
+    // 判斷 <ul>/<ol> 是否為「選單樣」list (整個 list 都是短文且互不關聯)
+    const isMenuList = (listEl) => {
+        const lis = Array.from(listEl.children).filter(c => c.tagName === 'LI');
+        if (lis.length < 3) return false;  // 條目少不算選單
+        let shortCount = 0;
+        let featCount = 0;
+        for (const li of lis) {
+            const txt = (li.innerText || li.textContent || '').trim();
+            if (!txt) continue;
+            if (txt.length < 10) shortCount++;
+            if (featRegex.test(txt) && !navWords.test(txt)) featCount++;
+        }
+        // 多數條目極短 (<10字) 且很少含真正特徵詞 → 是選單
+        return shortCount >= lis.length * 0.7 && featCount <= 1;
+    };
+
+    // 來源 1: 主內容區的 <li>,跳過「選單樣」list 內的條目
+    for (const li of root.querySelectorAll('li')) {
+        if (out.length >= 6) break;
+        if (isInSkip(li)) continue;
+        let hasList = false;
+        for (const c of li.children) if (c.tagName==='UL'||c.tagName==='OL'){hasList=true;break;}
+        if (hasList) continue;
+        // 檢查所屬 ul/ol 整體是否為選單樣
+        const parentList = li.closest('ul, ol');
+        if (parentList && isMenuList(parentList)) continue;
+        add(li.innerText || li.textContent || '');
+    }
+    // 來源 2: 主內容區的 p/div/dd/td/h3/h4 葉節點
+    if (out.length < 4) {
+        for (const el of root.querySelectorAll('p, div, dd, td, h3, h4')) {
+            if (out.length >= 6) break;
+            if (isInSkip(el)) continue;
+            let hasBlock = false;
+            for (const c of el.children) {
+                if (inlineTags.has(c.tagName) || c.tagName==='BR') continue;
+                if ((c.textContent||'').trim()) { hasBlock = true; break; }
+            }
+            if (hasBlock) continue;
+            add(el.innerText || el.textContent || '');
+        }
+    }
+    return out;
+}
+"""
+
+
+def _fill_highlights_from_detail(page, name, code, records, metas, list_url, cfg):
+    """對亮點為空的卡,逐一進詳細頁補抓亮點。會明顯變慢,故僅補空的。
+    records 與 metas 索引對齊;補到亮點後就地用 _build_record 重建該筆。"""
+    idx_empty = [i for i, m in enumerate(metas)
+                 if not m["highlights"]
+                 and m["href"] and m["href"] != list_url
+                 and str(m["href"]).startswith("http")]
+    if not idx_empty:
+        log.debug(f"[{name}] 無需進詳細頁 (列表頁亮點皆已取得)")
+        return
+    limit = cfg.get("detail_limit", 40)
+    todo = idx_empty[:limit]
+    log.info(f"[{name}] {len(idx_empty)} 張亮點為空,進詳細頁補抓 (上限 {limit},實補 {len(todo)})")
+
+    filled = 0
+    for n, i in enumerate(todo, 1):
+        m = metas[i]
+        url = m["href"]
+        try:
+            page.goto(url, timeout=40000, wait_until="domcontentloaded")
+            page.wait_for_timeout(1200)
+            hl = page.evaluate(JS_EXTRACT_DETAIL_HIGHLIGHTS)
+            if hl:
+                # 就地重建該筆 record,確保「亮點」「類別」欄位名與其他筆一致
+                records[i] = _build_record(
+                    bank_name=name, bank_code=code,
+                    card_name=m["card_name"], highlights=hl,
+                    apply_url=url, source=url,
+                )
+                metas[i]["highlights"] = hl
+                filled += 1
+                log.debug(f"[{name}] ({n}/{len(todo)}) {m['card_name']}: 補到 {len(hl)} 條")
+            else:
+                log.debug(f"[{name}] ({n}/{len(todo)}) {m['card_name']}: 詳細頁也無亮點")
+        except Exception as e:
+            log.debug(f"[{name}] 詳細頁失敗 {url}: {e}")
+        page.wait_for_timeout(500)
+    log.info(f"[{name}] 詳細頁補抓完成:{filled}/{len(todo)} 張補到亮點")
+
+
+def _click_page_number(page, pg_num: int, name: str) -> bool:
+    """嘗試點擊指定頁碼按鈕。回傳是否成功點擊。
+    多策略:Playwright locator + JS 在頁面內搜索可點擊元素。"""
+    # 策略 1: locator 試常見 selector
+    selectors = [
+        f'.pagination a:has-text("{pg_num}")',
+        f'.page-item:has-text("{pg_num}")',
+        f'[class*="paging"] a:has-text("{pg_num}")',
+        f'a[data-page="{pg_num}"]',
+        f'[aria-label*="第 {pg_num} 頁"]',
+        f'[aria-label*="page {pg_num}"]',
+        f'a:has-text("{pg_num}")',
+        f'button:has-text("{pg_num}")',
+    ]
+    for sel in selectors:
+        try:
+            locator = page.locator(sel).filter(has_text=str(pg_num))
+            count = locator.count()
+            for i in range(min(count, 8)):
+                el = locator.nth(i)
+                try:
+                    txt = (el.inner_text(timeout=1500) or "").strip()
+                except Exception:
+                    continue
+                if txt != str(pg_num):
+                    continue
+                try:
+                    el.scroll_into_view_if_needed(timeout=1500)
+                except Exception:
+                    pass
+                try:
+                    el.click(timeout=2500)
+                    log.debug(f"[{name}] 點擊第 {pg_num} 頁 (selector)")
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    # 策略 2: JS 在頁面找所有可點擊元素,文字剛好是 pg_num,且像分頁
+    js = r"""
+    (pgNum) => {
+        const candidates = [];
+        // 找所有可能是頁碼的元素:a/button/span/li/div 且文字剛好是 pgNum
+        for (const el of document.querySelectorAll('a, button, span, li, div')) {
+            const t = (el.innerText || el.textContent || '').trim();
+            if (t !== String(pgNum)) continue;
+            // 太大的元素不是頁碼 (例如整段內容)
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 100 || rect.height > 80) continue;
+            // 必須可視 (有寬高)
+            if (rect.width === 0 || rect.height === 0) continue;
+            candidates.push(el);
+        }
+        // 選最有可能是頁碼的:周圍 100px 有兄弟頁碼 (1/2/3 或更多)
+        for (const el of candidates) {
+            const parent = el.parentElement;
+            if (!parent) continue;
+            let siblingPgs = 0;
+            for (const sib of parent.children) {
+                if (sib === el) continue;
+                const st = (sib.innerText || sib.textContent || '').trim();
+                if (/^\d+$/.test(st) || /上一頁|下一頁|前一頁|後一頁|»|«|<|>/.test(st)) {
+                    siblingPgs++;
+                }
+            }
+            if (siblingPgs >= 1) {
+                el.scrollIntoView({block:'center'});
+                el.click();
+                return true;
+            }
+        }
+        return false;
+    }
+    """
+    try:
+        ok = page.evaluate(js, pg_num)
+        if ok:
+            log.debug(f"[{name}] 點擊第 {pg_num} 頁 (JS 兄弟頁碼)")
+            return True
+    except Exception as e:
+        log.debug(f"[{name}] JS 找頁碼失敗:{e}")
+    return False
 
 
 def _scroll_to_bottom(page, steps: int = 10):
@@ -679,12 +1106,11 @@ def _scroll_to_bottom(page, steps: int = 10):
 
 
 def run(bank_filter=None, output=None, headless=True, debug=False):
-    all_codes = list(BANK_CONFIGS.keys())
+    all_codes = list(BANK_CONFIGS.keys()) + ["ctbc"]   # 中信永遠走 hardcode
 
     if bank_filter:
         if bank_filter not in all_codes:
             log.error(f"未知代碼:{bank_filter},可用:{', '.join(all_codes)}")
-            # 提前處理 output 路徑供空檔輸出
             out_path = Path(output) if output else DEFAULT_OUTPUT
             out_path.parent.mkdir(parents=True, exist_ok=True)
             return save_csv([], str(out_path), "banks")
@@ -694,41 +1120,105 @@ def run(bank_filter=None, output=None, headless=True, debug=False):
 
     all_records = []
 
+    # 中信:不跑 Playwright,直接用 ctbc_cards.csv (避開 WAF/APP-1053)
+    if "ctbc" in run_codes:
+        log.info(f"中國信託銀行:直接使用 hardcode 清單 ({len(CTBC_FALLBACK_CARDS)} 張)")
+        all_records.extend(_ctbc_fallback_records("中國信託銀行", "ctbc"))
+        run_codes = [c for c in run_codes if c != "ctbc"]
+        if not run_codes:
+            # 只跑中信的話直接存檔
+            out_path = Path(output) if output else DEFAULT_OUTPUT
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            df = save_csv(all_records, str(out_path), "banks")
+            log.info(f"✅ 儲存:{out_path}({len(df)} 筆)")
+            return df
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-features=IsolateOrigins,site-per-process",
-            ],
-        )
+        # 優先嘗試系統真實 Chrome (channel='chrome'),指紋比 bundled Chromium 更乾淨;
+        # 環境沒裝 Chrome 時自動 fallback 回 Chromium。
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-dev-shm-usage",
+            "--disable-infobars",
+            "--start-maximized",
+        ]
+        browser = None
+        used_channel = None
+        for channel in ("chrome", None):
+            try:
+                kwargs = dict(headless=headless, args=launch_args)
+                if channel:
+                    kwargs["channel"] = channel
+                browser = p.chromium.launch(**kwargs)
+                used_channel = channel or "chromium(bundled)"
+                break
+            except Exception as e:
+                log.warning(f"啟動 channel={channel} 失敗:{e}")
+        if browser is None:
+            raise RuntimeError("無法啟動瀏覽器 (chrome 與 chromium 皆失敗)")
+        log.info(f"使用瀏覽器:{used_channel}")
+
+        # 關鍵:不偽造 UA 版本。取得 Chromium 真實 UA,只把 Headless 字樣拿掉,
+        # 並據此產生「對得上」的 sec-ch-ua client hints,避免 UA/版本矛盾被 WAF 抓。
+        tmp_page = browser.new_page()
+        real_ua = tmp_page.evaluate("() => navigator.userAgent")
+        tmp_page.close()
+        ua = real_ua.replace("HeadlessChrome", "Chrome")
+        m = re.search(r"Chrome/(\d+)", ua)
+        major = m.group(1) if m else "142"
+        sec_ch_ua = (f'"Chromium";v="{major}", '
+                     f'"Google Chrome";v="{major}", '
+                     f'"Not?A_Brand";v="99"')
+
         context = browser.new_context(
-            user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"),
+            user_agent=ua,
             viewport={"width": 1440, "height": 900},
             locale="zh-TW",
             timezone_id="Asia/Taipei",
             extra_http_headers={
-                "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+                "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
                 "Accept": ("text/html,application/xhtml+xml,application/xml;"
-                           "q=0.9,image/avif,image/webp,*/*;q=0.8"),
+                           "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+                "sec-ch-ua": sec_ch_ua,
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
             },
         )
-        # 強化反偵測:抹除多項 Playwright/Headless 指紋
+        # 強化反偵測:抹除自動化指紋,並補齊真瀏覽器才有的物件
         context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            Object.defineProperty(navigator, 'languages', {get: () => ['zh-TW', 'zh', 'en']});
-            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-            window.chrome = {runtime: {}};
+            Object.defineProperty(navigator, 'languages', {get: () => ['zh-TW', 'zh', 'en-US', 'en']});
+            Object.defineProperty(navigator, 'plugins', {get: () => {
+                return [
+                    {name: 'PDF Viewer'}, {name: 'Chrome PDF Viewer'},
+                    {name: 'Chromium PDF Viewer'}, {name: 'Microsoft Edge PDF Viewer'},
+                    {name: 'WebKit built-in PDF'}
+                ];
+            }});
+            Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+            Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+            window.chrome = {runtime: {}, loadTimes: function(){}, csi: function(){}, app: {}};
             const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
             if (originalQuery) {
                 window.navigator.permissions.query = (params) =>
-                    params.name === 'notifications'
+                    params && params.name === 'notifications'
                         ? Promise.resolve({state: Notification.permission})
                         : originalQuery(params);
             }
+            // WebGL vendor/renderer 偽裝成常見硬體
+            const getParameter = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(p) {
+                if (p === 37445) return 'Intel Inc.';
+                if (p === 37446) return 'Intel Iris OpenGL Engine';
+                return getParameter.call(this, p);
+            };
         """)
         page = context.new_page()
         success = 0
@@ -756,7 +1246,7 @@ def run(bank_filter=None, output=None, headless=True, debug=False):
 
 
 if __name__ == "__main__":
-    all_codes = list(BANK_CONFIGS.keys())
+    all_codes = list(BANK_CONFIGS.keys()) + ["ctbc"]
     ap = argparse.ArgumentParser(description="各銀行官網爬蟲 v11")
     ap.add_argument("--bank", help=f"銀行代碼:{', '.join(all_codes)}")
     ap.add_argument("--output", default=None,
