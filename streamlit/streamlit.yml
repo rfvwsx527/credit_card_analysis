@@ -1,0 +1,58 @@
+# Docker Swarm 部署方式：docker stack deploy -c streamlit.yml dashboard
+# 需先建立 overlay 網路（若尚未建立）：docker network create -d overlay my_swarm_network
+#
+# 前置：先在本機建置映像（Swarm 單節點即可用本機映像；多節點請改推送到 registry）
+#   docker build -t credit-card-dashboard:1.0 .
+#
+# 本服務為 Streamlit 儀表板，連線到「宿主機上的 MySQL（mydb）」讀取清理後資料表
+# （credit_card_stats_clean / banks_clean / ptt_credit_card_clean / dashboard_agg）。
+# 容器要連到宿主機的 MySQL，使用 host.docker.internal；Linux 節點靠 extra_hosts 的
+# host-gateway 解析，Docker Desktop(Mac/Windows) 則原生支援。
+#
+version: '3'  # compose 檔版本（3 以上支援 Swarm 部署）
+
+services:
+
+  dashboard:
+    image: credit-card-dashboard:1.0  # 由本目錄 Dockerfile 建置
+    environment:
+      MYSQL_HOST: host.docker.internal  # 宿主機 MySQL；若 DB 也在 swarm 內請改成該服務名
+      MYSQL_PORT: '3306'
+      MYSQL_DB: mydb
+      MYSQL_USER: root
+      MYSQL_PASSWORD: 'ppWgnb_mfGe2m_'  # 教學用；正式環境建議改用 docker secret（見檔尾說明）
+      # 清理後表名（與清理程式預設一致，可省略）
+      TBL_STATS: credit_card_stats_clean
+      TBL_BANKS: banks_clean
+      TBL_PTT: ptt_credit_card_clean
+    ports:
+      - 8501:8501  # 對外開放 Streamlit Web 介面（http://localhost:8501）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # 讓容器可連到宿主機（連宿主機 MySQL 用）
+    networks:
+      - my_swarm_network  # 加入 overlay 網路（與其他服務一致）
+    deploy:
+      mode: replicated   # replicated 模式
+      replicas: 1        # 單一副本即可（無狀態，可視需要增加）
+      placement:
+        constraints: [node.role==manager]  # 部署於 manager 節點
+      restart_policy:
+        condition: on-failure  # 失敗時自動重啟
+
+networks:
+  my_swarm_network:
+    external: true  # 使用外部已建立的 overlay 網路（需事先 docker network create）
+
+# ----------------------------------------------------------------------
+# （選用）改用 Docker Secret 帶密碼，較安全的作法：
+#   1) echo -n 'ppWgnb_mfGe2m_' | docker secret create mysql_password -
+#   2) 在本服務加上：
+#        secrets:
+#          - mysql_password
+#        environment:
+#          MYSQL_PASSWORD_FILE: /run/secrets/mysql_password   # 再於 app.py 讀取此檔
+#   3) 檔尾加：
+#        secrets:
+#          mysql_password:
+#            external: true
+# ----------------------------------------------------------------------

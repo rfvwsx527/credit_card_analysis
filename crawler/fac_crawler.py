@@ -1,0 +1,38 @@
+import requests
+import pandas as pd
+import io
+import os
+import urllib3
+
+from db_common import write_df_to_mysql
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUTPUT_DIR = os.path.join(BASE_DIR, "crawler_data")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+DIRECT_URL = "https://www.banking.gov.tw/webdowndoc?file=/stat/opendata/banking66.csv"
+
+# 寫入 MySQL 的資料表名稱
+DB_TABLE = "credit_card_stats"
+
+def download_credit_card_stats() -> pd.DataFrame:
+    resp = requests.get(DIRECT_URL, timeout=30, verify=False)
+    resp.encoding = "utf-8-sig"
+    df = pd.read_csv(io.StringIO(resp.text))
+
+    output_path = os.path.join(OUTPUT_DIR, "credit_card_stats.csv")
+    df.to_csv(output_path, index=False, encoding="utf-8-sig")
+    print(f"✅ 已儲存至 {output_path}")
+
+    # 同步寫入 MySQL (建表若無 → 清空全部 → 寫入);失敗不影響 CSV
+    write_df_to_mysql(df, DB_TABLE)
+    return df
+
+if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(message)s")
+    df = download_credit_card_stats()
+    print(df.head())
