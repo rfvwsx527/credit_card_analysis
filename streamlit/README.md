@@ -19,10 +19,13 @@ streamlit run app.py
 cd streamlit
 docker network create -d overlay my_swarm_network 2>/dev/null || true
 docker build -t credit-card-dashboard:1.0 .
-docker stack deploy -c streamlit.yml dashboard
+docker node update --label-add streamlit=true $(docker node ls -q)   # 自動帶入目前節點 ID
+docker stack deploy -c streamlit.yml streamlit
 ```
 
 完成後開啟 <http://localhost:8501>。
+
+> `streamlit.yml` 以 `node.labels.streamlit==true` 約束節點，**部署前務必先貼上 label**，否則服務會卡在 pending。
 
 > 執行前請先用清理程式建立 `*_clean` 資料表；連線參數可用環境變數調整。
 
