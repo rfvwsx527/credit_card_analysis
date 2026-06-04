@@ -70,9 +70,24 @@ VARCHAR_COLS = {
     "category": "VARCHAR(20)", "author": "VARCHAR(60)", "date_display": "VARCHAR(20)",
     "pub_time": "VARCHAR(30)", "pub_dt": "VARCHAR(20)", "title": "VARCHAR(500)",
     "url": "VARCHAR(255)", "metric": "VARCHAR(40)", "dim": "VARCHAR(120)",
-    "更新時間": "VARCHAR(20)",
+    "更新時間": "VARCHAR(20)", "場景標籤": "VARCHAR(80)",
 }
 LONGTEXT_COLS = {"content"}  # 內文可能很長
+
+# ── 卡片分類設定（與 app.py 一致）─────────────────────────────────────────
+# 卡別多標籤：原始「卡片類型」以「/」拆解後可能含這些標籤
+CARD_TYPE_TAGS = ["現金回饋", "紅利點數", "哩程", "聯名卡", "高階卡", "一般"]
+# 適用場景：依「卡名＋回饋亮點」文字關鍵字比對（可自行增修）
+SCENE_KW = {
+    "海外消費": ["海外", "國外", "國際", "跨境", "外幣"],
+    "旅遊住宿": ["旅遊", "旅行", "訂房", "飯店", "機票", "航空", "agoda", "booking", "trip"],
+    "行動支付": ["行動支付", "apple pay", "google pay", "samsung pay", "街口", "line pay", "悠遊付", "綁定"],
+    "加油交通": ["加油", "中油", "台塑", "停車", "高鐵", "捷運", "交通"],
+    "餐飲外送": ["餐廳", "美食", "餐飲", "用餐", "foodpanda", "ubereats", "uber eats", "外送", "咖啡"],
+    "超商量販": ["超商", "7-eleven", "全家", "全聯", "量販", "賣場", "好市多", "costco", "家樂福"],
+    "網購電商": ["網購", "電商", "momo", "蝦皮", "pchome", "amazon", "網路購物", "線上購物"],
+    "影音訂閱": ["串流", "訂閱", "netflix", "spotify", "youtube", "disney"],
+}
 
 
 def get_engine():
@@ -111,12 +126,22 @@ def col_type(col, dtype):
 
 
 def ensure_table(eng, table, df):
-    """資料表不存在才建立（含索引）；已存在則保持原狀。"""
+    """建表(若無)；若表已存在但缺少新欄位，自動 ALTER TABLE 補上（含索引）。"""
     cols_sql = ",\n  ".join(f"`{c}` {col_type(c, df[c].dtype)}" for c in df.columns)
     ddl = (f"CREATE TABLE IF NOT EXISTS `{table}` (\n  {cols_sql}\n) "
            f"ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci")
     with eng.begin() as c:
         c.execute(text(ddl))
+        # 自動補欄位：表已存在但缺少 df 的新欄位 → ADD COLUMN（不動既有資料）
+        existing = {r[0] for r in c.execute(text(f"SHOW COLUMNS FROM `{table}`"))}
+        added = []
+        for col in df.columns:
+            if col not in existing:
+                c.execute(text(
+                    f"ALTER TABLE `{table}` ADD COLUMN `{col}` {col_type(col, df[col].dtype)}"))
+                added.append(col)
+        if added:
+            print(f"  [schema] `{table}` 新增欄位：{added}")
         for idx_name, idx_col in INDEXES.get(table, []):
             try:
                 c.execute(text(f"CREATE INDEX `{idx_name}` ON `{table}` ({idx_col})"))
@@ -266,6 +291,24 @@ def clean_banks(eng):
         return max(map(float, nums)) if nums else np.nan
     df["最高回饋率_pct"] = df["回饋亮點"].apply(max_pct)
 
+    # ── 卡別多標籤：聯名卡/現金回饋 → 各自一個布林欄（TINYINT(1)）──────────
+    tag_lists = df["卡片類型"].astype(str).apply(
+        lambda t: [x.strip() for x in t.split("/") if x.strip()])
+    df["卡別數"] = tag_lists.apply(len)
+    for tag in CARD_TYPE_TAGS:
+        df[f"類_{tag}"] = tag_lists.apply(lambda lst: tag in lst)
+
+    # ── 適用場景：依卡名＋回饋亮點文字比對；一張卡可屬多場景 ───────────────
+    blob = (df["卡片名稱"].astype(str) + " " + df["回饋亮點"].astype(str)).str.lower()
+    scene_lists = blob.apply(
+        lambda txt: [s for s, kws in SCENE_KW.items()
+                     if any(k.lower() in txt for k in kws)])
+    for s in SCENE_KW:
+        df[f"場景_{s}"] = scene_lists.apply(lambda lst: s in lst)
+    df["場景數"] = scene_lists.apply(len)
+    df["場景標籤"] = scene_lists.apply(
+        lambda lst: "、".join(lst) if lst else "綜合/未標示")
+
     refresh_table(eng, DST["banks"], df)
     print(f"[banks] {len(df)} 張卡 / {df['銀行名稱'].nunique()} 家")
     return df
@@ -372,6 +415,20 @@ def build_agg(eng, stats, banks, ptt):
         add("product_卡別", n, v)
     for n, v in banks["銀行名稱"].value_counts().items():
         add("product_各行張數", n, v)
+    # 多標籤卡別張數（一張卡可計入多類）
+    for tag in CARD_TYPE_TAGS:
+        col = f"類_{tag}"
+        if col in banks.columns:
+            add("product_類型", tag, int(banks[col].sum()))
+    # 適用場景張數
+    for s in SCENE_KW:
+        col = f"場景_{s}"
+        if col in banks.columns:
+            add("product_場景", s, int(banks[col].sum()))
+    # 各銀行平均最高回饋率（僅計有數字者）
+    rb = banks.dropna(subset=["最高回饋率_pct"]).groupby("銀行名稱")["最高回饋率_pct"].mean()
+    for n, v in rb.items():
+        add("product_平均回饋率", n, round(float(v), 2))
 
     for ym, g in ptt.groupby("年月"):
         add("ptt_月貼文", ym, len(g))
