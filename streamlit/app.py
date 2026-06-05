@@ -172,6 +172,8 @@ def fig_style(fig, h=360):
     for ax in list(fig.select_xaxes()) + list(fig.select_yaxes()):
         if ax.title.text in (None, "", "x", "y"):
             ax.title.text = ""
+    # 長條圖數字標籤一律水平（避免細長條被自動轉 90 度）
+    fig.update_traces(textangle=0, selector=dict(type="bar"))
     return fig
 
 
@@ -318,9 +320,16 @@ OVERDUE = "逾期帳款比率-%"
 PERCARD = "卡均簽帳金額_元"
 ORGTYPE = "機構類型名稱"
 
-months = sorted(stats["年月"].unique())
+months = sorted(stats["年月"].unique())              # 統計(KPI/排名)用：stats 月份
 latest_data_month = months[-1]                              # 各資料中最晚有資料的月份
 last_month = months[-2] if len(months) >= 2 else months[-1]  # 「上個月」(倒數第二)
+
+# 趨勢滑桿時間軸：涵蓋所有時間序資料（stats + PTT）的最早～最晚，逐月補滿
+_time_vals = list(stats["年月"].dropna())
+if "年月" in ptt.columns:
+    _time_vals += list(ptt["年月"].dropna().astype(str))
+trend_months = [str(p) for p in
+                pd.period_range(min(_time_vals), max(_time_vals), freq="M")]
 
 
 # ----------------------------------------------------------------------
@@ -329,24 +338,21 @@ last_month = months[-2] if len(months) >= 2 else months[-1]  # 「上個月」(�
 with st.sidebar:
     st.header("篩選條件")
 
-    org_types = ["全部"] + sorted(stats[ORGTYPE].dropna().unique().tolist()) \
-        if ORGTYPE in stats.columns else ["全部"]
-    sel_type = st.selectbox("機構類型", org_types, index=0)
+    insts = ["全部"] + sorted(stats["機構名稱"].dropna().unique().tolist())
+    sel_inst = st.selectbox("機構（銀行／信用卡公司）", insts, index=0)
 
     sel_month = st.selectbox("統計月份（KPI / 排名）", months,
                              index=months.index(last_month))
 
-    # 趨勢圖觀察區間：結束預設為最晚有資料的月份（起始預設往前約 3 年）
-    default_start = months[max(0, len(months) - 37)]
-    rng = st.select_slider("趨勢觀察區間", options=months,
-                           value=(default_start, latest_data_month))
+    # 趨勢觀察區間：時間軸涵蓋所有資料的最早～最晚；結束預設為最晚月份
+    default_start = trend_months[max(0, len(trend_months) - 37)]
+    rng = st.select_slider("趨勢觀察區間", options=trend_months,
+                           value=(default_start, trend_months[-1]))
     top_n = st.slider("排名顯示前 N 名", 5, 25, 10)
-    st.caption(f"資料區間：{months[0]} ~ {months[-1]}（共 {len(months)} 個月）")
-    st.caption(f"連線：{CFG['host']}:{CFG['port']}/{CFG['db']}")
+    st.caption(f"資料區間：{trend_months[0]} ~ {trend_months[-1]}（共 {len(trend_months)} 個月）")
 
-# 套用機構類型篩選
-S = stats if sel_type == "全部" or ORGTYPE not in stats.columns \
-    else stats[stats[ORGTYPE] == sel_type]
+# 套用機構篩選（單一機構或全部）
+S = stats if sel_inst == "全部" else stats[stats["機構名稱"] == sel_inst]
 cur = S[S["年月"] == sel_month]
 in_range = [m for m in months if rng[0] <= m <= rng[1]]
 S_rng = S[S["年月"].isin(in_range)]
@@ -374,7 +380,11 @@ for col, (title, snow, sprev, scale, unit) in zip(
     col.metric(f"{title}（{unit}）", f"{now:,.0f}", delta)
 k5.metric("統計機構數（家）", f"{cur['機構名稱'].nunique():,}")
 
-st.caption(f"以上為 {sel_month}・{sel_type} 的加總；delta 為較上月（{prev_month or '—'}）變化")
+st.markdown(
+    f"<p style='color:#e8736b;font-weight:700;font-size:1.1rem;"
+    f"text-decoration:underline;margin:.1rem 0 1.6rem'>"
+    f"以上為 {sel_month} 較上月{prev_month or '—'}變化</p>",
+    unsafe_allow_html=True)
 
 # 側邊欄「聚焦」區標題（各分頁的聚焦下拉會接在這之後，由各分頁的 focus_control 加入）
 with st.sidebar:
@@ -416,10 +426,12 @@ with tab1:
         st.subheader(f"{tag}流通卡數 vs 循環信用餘額")
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=trend["年月"], y=trend["流通萬張"],
-                                 name="流通卡數(萬張)", line=dict(color="#4fd1c5")))
+                                 name="流通卡數(萬張)", line=dict(color="#4fd1c5"),
+                                 hovertemplate="年月：%{x}<br>流通卡數：%{y:,.0f} 萬張<extra></extra>"))
         fig.add_trace(go.Scatter(x=trend["年月"], y=trend["循環億元"],
                                  name="循環餘額(億元)", yaxis="y2",
-                                 line=dict(color="#e8736b")))
+                                 line=dict(color="#e8736b"),
+                                 hovertemplate="年月：%{x}<br>循環餘額：%{y:,.0f} 億元<extra></extra>"))
         fig.update_layout(yaxis2=dict(overlaying="y", side="right"))
         st.plotly_chart(fig_style(fig), use_container_width=True)
 
@@ -432,6 +444,8 @@ with tab1:
             fig = px.area(bytype, x="年月", y=SPEND, color=ORGTYPE,
                           color_discrete_sequence=PALETTE)
             fig.update_yaxes(title="簽帳億元")
+            fig.update_traces(
+                hovertemplate="年月：%{x}｜%{fullData.name}<br>簽帳金額：%{y:,.0f} 億元<extra></extra>")
             st.plotly_chart(fig_style(fig), use_container_width=True)
         else:
             st.info("資料無機構類型欄位")
@@ -458,7 +472,8 @@ with tab1:
         cols_s = ["#e8736b" if b == focus else "#e8b84b" for b in order_s]
         fig = px.bar(x=ts_all.values, y=order_s, orientation="h",
                      text=[f"{v:,.0f}" for v in ts_all.values])
-        fig.update_traces(marker_color=cols_s)
+        fig.update_traces(marker_color=cols_s,
+                          hovertemplate="機構名稱：%{y}<br>簽帳金額：%{x:,.0f} 億元<extra></extra>")
         show_selectable(fig, k_spend)
     with c6:
         st.subheader(f"流通卡數 Top {top_n}（{sel_month}・萬張）")
@@ -466,7 +481,8 @@ with tab1:
         cols_c = ["#e8736b" if b == focus else "#4fd1c5" for b in order_c]
         fig = px.bar(x=tc_all.values, y=order_c, orientation="h",
                      text=[f"{v:,.0f}" for v in tc_all.values])
-        fig.update_traces(marker_color=cols_c)
+        fig.update_traces(marker_color=cols_c,
+                          hovertemplate="機構名稱：%{y}<br>流通卡數：%{x:,.0f} 萬張<extra></extra>")
         show_selectable(fig, k_cards)
 
 # ----------------------------------------------------------------------
@@ -528,7 +544,8 @@ with tab2:
         cols_p = ["#e8736b" if b == focus else "#7aa2f7" for b in order_p]
         fig = px.bar(x=pc_all.values, y=order_p, orientation="h",
                      text=[f"{v:,.0f}" for v in pc_all.values])
-        fig.update_traces(marker_color=cols_p)
+        fig.update_traces(marker_color=cols_p,
+                          hovertemplate="機構名稱：%{y}<br>卡均簽帳金額：%{x:,.0f} 元<extra></extra>")
         show_selectable(fig, k_perc)
     with c4:
         st.subheader(f"逾期帳款比率 Top {top_n}（{sel_month}・%）")
@@ -536,7 +553,8 @@ with tab2:
         cols_r = ["#b48ead" if b == focus else "#e8736b" for b in order_r]
         fig = px.bar(x=rk_all.values, y=order_r, orientation="h",
                      text=[f"{v:.2f}" for v in rk_all.values])
-        fig.update_traces(marker_color=cols_r)
+        fig.update_traces(marker_color=cols_r,
+                          hovertemplate="機構名稱：%{y}<br>逾期帳款比率：%{x:.2f}%<extra></extra>")
         show_selectable(fig, k_over)
 
     st.subheader(f"簽帳金額 vs 流通卡數（泡泡＝機構，{sel_month}）")
@@ -544,7 +562,9 @@ with tab2:
     fig = px.scatter(sc, x="卡數萬張", y="簽帳億元", text="機構名稱",
                      size="簽帳億元", color="簽帳億元",
                      color_continuous_scale="YlOrBr")
-    fig.update_traces(textposition="top center", textfont_size=9)
+    fig.update_traces(textposition="top center", textfont_size=9,
+                      hovertemplate="機構名稱：%{text}<br>流通卡數：%{x:,.0f} 萬張"
+                                    "<br>簽帳金額：%{y:,.0f} 億元<extra></extra>")
     show_selectable(fig, k_sc, 460)
 
 # ----------------------------------------------------------------------
@@ -565,13 +585,15 @@ with tab3:
         pull = [0.08 if n == focus_cat else 0 for n in ct.index]
         fig = px.pie(values=ct.values, names=ct.index, hole=0.5,
                      color_discrete_sequence=PALETTE)
-        fig.update_traces(pull=pull)
+        fig.update_traces(pull=pull,
+                          hovertemplate="主卡別：%{label}<br>卡片數：%{value} 張（%{percent}）<extra></extra>")
         show_selectable(fig, k_pie)
     with c2:
         st.subheader(f"各銀行收錄產品數{'（'+focus_cat+'）' if focus_cat else ''}")
         bp = bset["銀行名稱"].value_counts().sort_values()
         fig = px.bar(x=bp.values, y=bp.index, orientation="h",
                      text=bp.values, color_discrete_sequence=["#9ece6a"])
+        fig.update_traces(hovertemplate="銀行名稱：%{y}<br>產品數：%{x} 張<extra></extra>")
         st.plotly_chart(fig_style(fig), use_container_width=True)
 
     if "最高回饋率_pct" in banks.columns:
@@ -622,13 +644,17 @@ with tab4:
     with c1:
         st.subheader(f"{tg}PTT 每月貼文量")
         pv = psub.groupby("年月").size().reset_index(name="篇數")
-        fig = px.bar(pv, x="年月", y="篇數", color_discrete_sequence=["#e8b84b"])
+        fig = px.bar(pv, x="年月", y="篇數", text="篇數",
+                     color_discrete_sequence=["#e8b84b"])
+        fig.update_traces(textposition="outside", textfont_size=11,
+                          hovertemplate="年月：%{x}<br>篇數：%{y} 篇<extra></extra>")
         st.plotly_chart(fig_style(fig), use_container_width=True)
     with c2:
         st.subheader(f"{tg}貼文分類占比")
         cc = psub["分類"].value_counts()
         fig = px.pie(values=cc.values, names=cc.index, hole=0.5,
                      color_discrete_sequence=PALETTE)
+        fig.update_traces(hovertemplate="分類：%{label}<br>篇數：%{value}（%{percent}）<extra></extra>")
         st.plotly_chart(fig_style(fig), use_container_width=True)
 
     c3, c4 = st.columns(2)
@@ -637,8 +663,9 @@ with tab4:
         order_v = list(ms.index)
         cols_v = ["#e8736b" if b == focus_bk else "#4fd1c5" for b in order_v]
         fig = px.bar(x=ms.values, y=order_v, orientation="h", text=ms.values)
-        fig.update_traces(marker_color=cols_v)
-        show_selectable(fig, k_voice)
+        fig.update_traces(marker_color=cols_v, textposition="outside", textfont_size=12,
+                          hovertemplate="銀行名稱：%{y}<br>被提及篇數：%{x} 篇<extra></extra>")
+        show_selectable(fig, k_voice, 460)
     with c4:
         if focus_bk:
             st.subheader(f"{focus_bk}：每月被提及篇數")
@@ -760,7 +787,8 @@ with tab5:
         colors = ["#e8736b" if b == focus_bank else "#e8b84b" for b in rate_order]
         figr = px.bar(x=rate_series.values, y=rate_order, orientation="h",
                       text=[f"{v:.1f}" for v in rate_series.values])
-        figr.update_traces(marker_color=colors)
+        figr.update_traces(marker_color=colors,
+                           hovertemplate="銀行名稱：%{y}<br>平均最高回饋率：%{x:.1f}%<extra></extra>")
         show_selectable(figr, rate_chart_key)
     with c2:
         if focus_bank:
@@ -774,6 +802,7 @@ with tab5:
         ).sort_values()
         fig = px.bar(x=scene_cnt.values, y=scene_cnt.index, orientation="h",
                      text=scene_cnt.values, color_discrete_sequence=["#4fd1c5"])
+        fig.update_traces(hovertemplate="適用場景：%{y}<br>卡片數：%{x} 張<extra></extra>")
         st.plotly_chart(fig_style(fig), use_container_width=True)
 
     if focus_bank:
@@ -790,7 +819,7 @@ with tab5:
                     labels=dict(x="卡片類型", y="銀行", color="張數"))
     st.plotly_chart(fig_style(fig, 420), use_container_width=True)
 
-with st.expander("📋 資料說明 / 口徑"):
+with st.expander("📋 資料說明"):
     st.markdown(
         "- **金額單位**：原始為「新臺幣百萬元」，圖表多換算為「億元」(÷100)；卡數換算「萬張」(÷1e4)。\n"
         "- **卡均簽帳金額**：本月簽帳金額 ÷ 有效卡數。\n"
@@ -798,10 +827,9 @@ with st.expander("📋 資料說明 / 口徑"):
         "- **社群聲量**：以關鍵字比對 PTT 標題＋內文是否「提及」該銀行，非情緒分析。\n"
         "- **卡片類型**：原始「卡片類型」為複合標籤，以「/」拆成多標籤（現金回饋/紅利點數/哩程/聯名卡/高階卡/一般）。\n"
         "- **適用場景**：依回饋亮點文字關鍵字比對（海外、旅遊、行動支付、加油、餐飲、超商、網購、影音等），一張卡可屬多場景；無命中標為「綜合/未標示」。\n"
-        "- **最高回饋率**：從回饋亮點文字解析出的最大百分比；部分卡無明確數字故顯示「—」。\n"
-        "- 資料來源：金管會發卡統計 · 各銀行產品目錄 · PTT 信用卡板｜清理後存於 MySQL。")
+        "- **最高回饋率**：從回饋亮點文字解析出的最大百分比；部分卡無明確數字故顯示「—」。")
 
-st.caption("資料來源：金管會發卡統計 · 各銀行產品目錄 · PTT 信用卡板｜清理後存於 MySQL")
+st.caption("資料來源：金管會發卡統計 · 各銀行信用卡 · PTT 信用卡版")
 
 # 側邊欄底部：一鍵清除所有分頁的聚焦（callback 於 widget 建立前執行，合法）
 with st.sidebar:
