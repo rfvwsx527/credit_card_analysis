@@ -16,6 +16,7 @@
   程式不寫死密碼。正式環境建議改用 docker secret，並更換已外洩的密碼。
 """
 import os
+import re
 from urllib.parse import quote_plus
 
 import numpy as np
@@ -155,8 +156,7 @@ def load_ptt():
         text("SELECT COLUMN_NAME FROM information_schema.COLUMNS "
              "WHERE TABLE_SCHEMA=:d AND TABLE_NAME=:t"),
         eng, params={"d": CFG["db"], "t": t})["COLUMN_NAME"].tolist()
-    use = [c for c in cols if c != "content"]      # 不撈長內文以加速
-    sel = ", ".join(f"`{c}`" for c in use)
+    sel = ", ".join(f"`{c}`" for c in cols)        # 含內文：提及內容與文字雲需要
     return pd.read_sql(f"SELECT {sel} FROM `{t}`", eng)
 
 
@@ -311,6 +311,120 @@ except Exception as e:
 
 banks = enrich_banks(banks)   # 衍生：多標籤卡別 + 適用場景
 
+# ----------------------------------------------------------------------
+# PTT 內文 / 網址 欄位偵測 + 中文文字雲工具
+#   不同清理版本的欄名可能不同，這裡用候選清單自動比對。
+# ----------------------------------------------------------------------
+def _find_col(df, cands):
+    cols = list(df.columns)
+    for c in cands:
+        if c in cols:
+            return c
+    low = {str(c).lower(): c for c in cols}
+    for c in cands:
+        if c.lower() in low:
+            return low[c.lower()]
+    return None
+
+
+PTT_URL_COL = _find_col(
+    ptt, ["url", "link", "網址", "連結", "href", "post_url",
+          "article_url", "文章網址", "貼文網址"])
+PTT_CONTENT_COL = _find_col(
+    ptt, ["content", "內文", "內容", "本文", "文章內容"])
+
+# WordCloud 顯示中文需指定 CJK 字型；找不到就改用備援長條圖
+_FONT_CANDS = [
+    os.getenv("WC_FONT_PATH", ""),
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "C:/Windows/Fonts/msjh.ttc",
+]
+
+
+def _cjk_font():
+    for p in _FONT_CANDS:
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
+_STOPWORDS = set("""的 了 是 在 我 有 和 就 不 人 都 一 也 很 到 說 要 去 你 會 著 沒有
+看 好 自己 這 那 他 她 它 們 我們 你們 他們 與 及 或 而 但 並 把 被 讓 給 從 對 為 之
+什麼 怎麼 沒 有沒有 知道 應該 比較 推薦 現在 已經 其實 一個 不過 而且 可能 還是 真的
+覺得 然後 這個 那個 想 問 一下 目前 因為 所以 如果 可以 請問 謝謝 大家
+信用卡 卡 卡片 銀行 from on with png jpg jpeg jpe imgur reurl mopix index app sent
+html cube xd nt meee my point""".split())
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def build_wordcloud_png(texts, max_words=120):
+    """以 jieba 斷詞後產生中文文字雲 PNG bytes。
+    缺 wordcloud / jieba / 中文字型時回傳 (None, 原因)，由呼叫端改用備援圖。"""
+    try:
+        import jieba
+        from wordcloud import WordCloud
+    except Exception:
+        return None, "missing_pkg"
+    font = _cjk_font()
+    if not font:
+        return None, "missing_font"
+    blob = " ".join(t for t in texts if isinstance(t, str))
+    if not blob.strip():
+        return None, "empty"
+    freq = {}
+    for w in jieba.cut(blob):
+        w = w.strip().lower()
+        if len(w) < 2 or w in _STOPWORDS or w.isdigit():
+            continue
+        if re.fullmatch(r"[\W_]+", w):
+            continue
+        freq[w] = freq.get(w, 0) + 1
+    if not freq:
+        return None, "empty"
+    # 圓形遮罩：圓內填字、圓外留白（255=白=不繪製）
+    size = 600
+    yy, xx = np.ogrid[:size, :size]
+    r = size // 2
+    mask = ((((xx - r) ** 2 + (yy - r) ** 2) > (r - 2) ** 2)
+            .astype(np.uint8) * 255)
+    wc = WordCloud(font_path=font, mask=mask,
+                   background_color=None, mode="RGBA",
+                   max_words=max_words, colormap="YlOrBr",
+                   prefer_horizontal=0.9, collocations=False
+                   ).generate_from_frequencies(freq)
+    img = wc.to_image()                       # RGBA（背景透明、圓形、無外框）
+    import io
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue(), "ok"
+
+
+def top_terms(texts, n=20):
+    """備援：高頻詞統計（jieba 可用就斷詞，否則退化為中文 2-gram 粗切）。"""
+    blob = " ".join(t for t in texts if isinstance(t, str))
+    try:
+        import jieba
+        toks = jieba.cut(blob)
+    except Exception:
+        toks = re.findall(r"[\u4e00-\u9fff]{2}", blob)
+    freq = {}
+    for w in toks:
+        w = w.strip().lower()
+        if len(w) < 2 or w in _STOPWORDS or w.isdigit():
+            continue
+        if re.fullmatch(r"[\W_]+", w):
+            continue
+        freq[w] = freq.get(w, 0) + 1
+    if not freq:
+        return pd.Series(dtype=int)
+    return pd.Series(freq).sort_values(ascending=False).head(n)
+
+
 # 共用欄位
 SPEND = "本月簽帳金額-新臺幣百萬元"
 CARDS = "流通卡數-張"
@@ -392,8 +506,8 @@ with st.sidebar:
     st.subheader("🔎 聚焦（依分頁）")
     st.caption("選擇後，對應分頁的圖表會只顯示該項目；也可直接點分頁中的長條／圓餅／泡泡圖聚焦。")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📈 市場總覽", "🏦 機構競爭", "💼 產品分析", "💬 社群聲量", "💳 優惠比較"])
+tab1, tab2, tab3, tab5, tab4 = st.tabs(
+    ["📈 市場總覽", "🏦 機構競爭", "💼 產品分析", "💳 優惠比較", "💬 社群聲量"])
 
 # ----------------------------------------------------------------------
 # Tab1 市場總覽
@@ -629,8 +743,19 @@ with tab3:
 with tab4:
     nonce = focus_nonce("t4")
     mention_cols = [c for c in ptt.columns if c.startswith("提及_")]
+
+    # 推噓數範圍（以全體 PTT 為準，聚焦切換時範圍不變；篩選器放在熱門貼文表格旁）
+    if "推噓數" in ptt.columns:
+        push_lo = int(np.nanmin(ptt["推噓數"]))
+        push_hi = int(np.nanmax(ptt["推噓數"]))
+    else:
+        push_lo = push_hi = 0
+    has_push_filter = ("推噓數" in ptt.columns) and (push_hi > push_lo)
+
     mention = {c.replace("提及_", ""): int(ptt[c].sum()) for c in mention_cols}
     ms = pd.Series(mention).sort_values()
+    if ms.empty:
+        ms = pd.Series({c.replace("提及_", ""): 0 for c in mention_cols}).sort_values()
     k_voice = f"t4_voice_{nonce}"
     focus_bk = focus_control("t4", "社群聲量 · 聚焦銀行",
                              list(ms.sort_values(ascending=False).index),
@@ -644,10 +769,28 @@ with tab4:
     with c1:
         st.subheader(f"{tg}PTT 每月貼文量")
         pv = psub.groupby("年月").size().reset_index(name="篇數")
-        fig = px.bar(pv, x="年月", y="篇數", text="篇數",
+
+        # 將「年月」轉為「2025/1」樣式並依時間排序，讓每根長條下都有標籤
+        def _ym_parse(v):
+            ts = pd.to_datetime(str(v), errors="coerce")
+            if pd.notna(ts):
+                return ts.year, ts.month
+            ds = [int(x) for x in "".join(
+                c if c.isdigit() else " " for c in str(v)).split()]
+            return (ds[0], ds[1]) if len(ds) >= 2 else (0, 0)
+
+        pv["_key"] = pv["年月"].map(_ym_parse)
+        pv = pv.sort_values("_key")
+        pv["月標籤"] = pv["_key"].map(lambda k: f"{k[0]}/{k[1]}")
+
+        fig = px.bar(pv, x="月標籤", y="篇數", text="篇數",
                      color_discrete_sequence=["#e8b84b"])
         fig.update_traces(textposition="outside", textfont_size=11,
                           hovertemplate="年月：%{x}<br>篇數：%{y} 篇<extra></extra>")
+        # 類別軸：每個月都顯示標籤（直式）；移除底部「年月」軸標題
+        fig.update_xaxes(type="category", title_text="", tickangle=-90,
+                         tickfont_size=10, categoryorder="array",
+                         categoryarray=pv["月標籤"].tolist())
         st.plotly_chart(fig_style(fig), use_container_width=True)
     with c2:
         st.subheader(f"{tg}貼文分類占比")
@@ -686,11 +829,93 @@ with tab4:
                           color_discrete_sequence=PALETTE)
         st.plotly_chart(fig_style(fig), use_container_width=True)
 
-    st.subheader(f"{tg}熱門貼文 Top 10（依推噓數）")
-    hot = psub.sort_values("推噓數", ascending=False).head(10)
-    hot_cols = [c for c in ["title", "分類", "推噓數", "年月"] if c in hot.columns]
-    st.dataframe(hot[hot_cols].rename(columns={"title": "標題"}),
-                 use_container_width=True, height=360, hide_index=True)
+    # ── 貼文內容文字雲 ──
+    st.subheader(f"{tg}貼文內容文字雲")
+    if PTT_CONTENT_COL:
+        texts = tuple(psub[PTT_CONTENT_COL].dropna().astype(str).tolist())
+        png, status = build_wordcloud_png(texts)
+        if status == "ok" and png:
+            # 置中並縮小，避免佔滿整個版面
+            _, cmid, _ = st.columns([1.6, 1, 1.6])
+            with cmid:
+                st.image(png, use_container_width=True)
+        else:
+            s = top_terms(texts, 20)            # 備援：高頻詞長條圖
+            if s.empty:
+                st.info("目前沒有可分析的內文。")
+            else:
+                fig = px.bar(x=list(s.values)[::-1], y=list(s.index)[::-1],
+                             orientation="h", text=list(s.values)[::-1],
+                             color_discrete_sequence=["#b48ead"])
+                fig.update_traces(hovertemplate="詞：%{y}<br>出現次數：%{x}<extra></extra>")
+                st.plotly_chart(fig_style(fig, 460), use_container_width=True)
+            if status == "missing_pkg":
+                st.caption("提示：安裝 `wordcloud` 與 `jieba` 即可顯示文字雲；目前先以高頻詞長條圖替代。")
+            elif status == "missing_font":
+                st.caption("提示：未偵測到中文字型；設定環境變數 `WC_FONT_PATH` 指向 CJK 字型"
+                           "（如 Noto Sans CJK）即可顯示文字雲。")
+    else:
+        st.info("資料表沒有內文欄位（content / 內文），無法產生文字雲。")
+
+    # ── 熱門貼文表格：標題 + 推噓數篩選（並排），篩選直接作用於本表 ──
+    th, tf, _sp = st.columns([1.5, 1.5, 3], vertical_alignment="top")
+    with th:
+        st.subheader(f"{tg}熱門貼文 Top 10（依推噓數）")
+    with tf:
+        if has_push_filter:
+            if "t4_push" not in st.session_state:
+                st.session_state["t4_push"] = (push_lo, push_hi)
+            # 顯示「推噓數」標籤於滑桿上方，並與標題頂端對齊、緊貼標題右側
+            rng = st.slider("推噓數", push_lo, push_hi, key="t4_push")
+        else:
+            rng = None
+            st.caption("（無推噓數欄位可篩選）")
+
+    base = psub
+    if rng is not None and "推噓數" in base.columns:
+        base = base[(base["推噓數"] >= rng[0]) & (base["推噓數"] <= rng[1])]
+        st.caption(f"符合條件：{len(base)} 篇（推噓數 {rng[0]} ～ {rng[1]}）")
+
+    if "推噓數" in base.columns and len(base):
+        hot = base.sort_values("推噓數", ascending=False).head(10).copy()
+    else:
+        hot = base.head(10).copy()
+
+    disp = pd.DataFrame(index=range(1, len(hot) + 1))
+    disp["排名"] = disp.index
+    if "title" in hot.columns:
+        disp["標題"] = hot["title"].values
+    if "分類" in hot.columns:
+        disp["分類"] = hot["分類"].values
+    if "推噓數" in hot.columns:
+        disp["推噓數"] = hot["推噓數"].values
+    if "年月" in hot.columns:
+        disp["年月"] = hot["年月"].astype(str).values
+    if PTT_CONTENT_COL:
+        disp["提及內容"] = (hot[PTT_CONTENT_COL].astype(str)
+                          .str.replace(r"\s+", " ", regex=True)
+                          .str.slice(0, 200).values)
+    if PTT_URL_COL:
+        disp["貼文網址"] = hot[PTT_URL_COL].astype(str).values
+
+    push_max = int(hot["推噓數"].max()) if ("推噓數" in hot.columns and len(hot)) else 1
+    # use_container_width=True 讓表格寬度與先前版本一致（撐滿版面）；
+    # 欄寬用「整數像素」固定，stretch 時不會被等比撐開，# 仍窄、提及內容仍寬。
+    st.dataframe(
+        disp, use_container_width=True, hide_index=True,
+        height=(len(disp) + 1) * 35 + 3,
+        column_config={
+            "排名": st.column_config.NumberColumn("#", width=46, format="%d"),
+            "標題": st.column_config.TextColumn("標題", width=320),
+            "分類": st.column_config.TextColumn("分類", width=90),
+            "推噓數": st.column_config.ProgressColumn(
+                "推噓數", width=130, format="%d",
+                min_value=0, max_value=max(push_max, 1)),
+            "年月": st.column_config.TextColumn("年月", width=88),
+            "提及內容": st.column_config.TextColumn("提及內容", width=620),
+            "貼文網址": st.column_config.LinkColumn(
+                "貼文網址", width=110, display_text="開啟原文"),
+        })
 
 # ----------------------------------------------------------------------
 # Tab5 優惠比較
