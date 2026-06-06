@@ -1,0 +1,84 @@
+# Docker Swarm producer：信用卡分散式爬蟲派工
+# 部署：docker stack deploy -c docker-compose-card-crawler-producer.yml card_producer
+# 比照你的 producer_crawler_finmind_duplicate 模式（跑一次派工腳本即結束）。
+#
+# 三個 producer 各自：建表+清空對應 DB 表一次 → 把任務丟進佇列。
+# restart: on-failure（派完就結束，不要一直重啟）。
+# 重新爬資料時，重新部署或 docker service update --force 觸發再跑一次。
+#
+version: '3.0'
+
+services:
+
+  card_producer_ptt:
+    image: rfvwsx527/credit-card-crawler:1.0
+    hostname: "card_producer_ptt"
+    command: python -m crawler.producer_ptt
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: [node.labels.producer==true]
+    restart: on-failure
+    environment:
+      - TZ=Asia/Taipei
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_ACCOUNT=worker
+      - RABBITMQ_PASSWORD=worker
+      - MYSQL_HOST=mysql_mysql
+      - MYSQL_PORT=3306
+      - MYSQL_ACCOUNT=root
+      - MYSQL_PASSWORD=ppWgnb_mfGe2m_
+      - MYSQL_DB=mydb
+    networks:
+      - my_swarm_network
+
+  card_producer_banks:
+    image: rfvwsx527/credit-card-crawler:1.0
+    hostname: "card_producer_banks"
+    command: python -m crawler.producer_banks
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: [node.labels.producer==true]
+    restart: on-failure
+    environment:
+      - TZ=Asia/Taipei
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_ACCOUNT=worker
+      - RABBITMQ_PASSWORD=worker
+      - MYSQL_HOST=mysql_mysql
+      - MYSQL_PORT=3306
+      - MYSQL_ACCOUNT=root
+      - MYSQL_PASSWORD=ppWgnb_mfGe2m_
+      - MYSQL_DB=mydb
+    networks:
+      - my_swarm_network
+
+  card_producer_stats:
+    image: rfvwsx527/credit-card-crawler:1.0
+    hostname: "card_producer_stats"
+    command: python -m crawler.producer_card_stats
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: [node.labels.producer==true]
+    restart: on-failure
+    environment:
+      - TZ=Asia/Taipei
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_ACCOUNT=worker
+      - RABBITMQ_PASSWORD=worker
+      - MYSQL_HOST=mysql_mysql
+      - MYSQL_PORT=3306
+      - MYSQL_ACCOUNT=root
+      - MYSQL_PASSWORD=ppWgnb_mfGe2m_
+      - MYSQL_DB=mydb
+    networks:
+      - my_swarm_network
+
+networks:
+  my_swarm_network:
+    external: true

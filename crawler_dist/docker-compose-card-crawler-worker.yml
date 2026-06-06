@@ -1,0 +1,85 @@
+# Docker Swarm worker：信用卡分散式爬蟲
+# 部署：docker stack deploy -c docker-compose-card-crawler-worker.yml card_crawler
+# 比照你的 twse/tpex worker 模式（Celery 消費 RabbitMQ 佇列）。
+#
+# 前置：
+#   docker build -t credit-card-crawler:1.0 .   （或推到 registry 改 image）
+#   幫節點貼 label（這裡共用既有的 worker label，可自行改）：
+#   docker node update --label-add card_crawler=true $(docker node ls -q)
+#
+version: '3.0'
+
+services:
+
+  card_worker_ptt:  # PTT 逐頁
+    image: rfvwsx527/credit-card-crawler:1.0
+    hostname: "card_ptt.{{.Task.Slot}}"
+    command: celery -A crawler.worker worker --loglevel=info --hostname=%h -Q ptt -E
+    deploy:
+      mode: replicated
+      replicas: 2  # 平行抓頁，可調大
+      placement:
+        constraints: [node.labels.card_crawler==true]
+    restart: always
+    environment:
+      - TZ=Asia/Taipei
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_ACCOUNT=worker
+      - RABBITMQ_PASSWORD=worker
+      - MYSQL_HOST=mysql_mysql    # 你的 MySQL swarm 服務名（stack mysql / service mysql）
+      - MYSQL_PORT=3306
+      - MYSQL_ACCOUNT=root
+      - MYSQL_PASSWORD=ppWgnb_mfGe2m_
+      - MYSQL_DB=mydb
+    networks:
+      - my_swarm_network
+
+  card_worker_banks:  # 各銀行（Playwright）
+    image: rfvwsx527/credit-card-crawler:1.0
+    hostname: "card_banks.{{.Task.Slot}}"
+    command: celery -A crawler.worker worker --loglevel=info --hostname=%h -Q banks -E --concurrency=2
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: [node.labels.card_crawler==true]
+    restart: always
+    environment:
+      - TZ=Asia/Taipei
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_ACCOUNT=worker
+      - RABBITMQ_PASSWORD=worker
+      - MYSQL_HOST=mysql_mysql
+      - MYSQL_PORT=3306
+      - MYSQL_ACCOUNT=root
+      - MYSQL_PASSWORD=ppWgnb_mfGe2m_
+      - MYSQL_DB=mydb
+    networks:
+      - my_swarm_network
+
+  card_worker_stats:  # 金管會統計（單一任務）
+    image: rfvwsx527/credit-card-crawler:1.0
+    hostname: "card_stats.{{.Task.Slot}}"
+    command: celery -A crawler.worker worker --loglevel=info --hostname=%h -Q card_stats -E
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: [node.labels.card_crawler==true]
+    restart: always
+    environment:
+      - TZ=Asia/Taipei
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_ACCOUNT=worker
+      - RABBITMQ_PASSWORD=worker
+      - MYSQL_HOST=mysql_mysql
+      - MYSQL_PORT=3306
+      - MYSQL_ACCOUNT=root
+      - MYSQL_PASSWORD=ppWgnb_mfGe2m_
+      - MYSQL_DB=mydb
+    networks:
+      - my_swarm_network
+
+networks:
+  my_swarm_network:
+    external: true

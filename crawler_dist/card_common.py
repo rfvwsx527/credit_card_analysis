@@ -118,7 +118,7 @@ def make_record(bank_name: str, bank_code: str, card_name: str,
         "回饋亮點3": h[2],
         "申辦連結": apply_url,
         "資料來源": source,
-        "更新時間": datetime.now().strftime("%Y-%m-%d"),
+        "更新時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 

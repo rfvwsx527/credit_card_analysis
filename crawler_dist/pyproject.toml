@@ -10,6 +10,7 @@ dependencies = [
     "cryptography>=48.0.0",
     "ipykernel>=7.2.0",
     "lxml>=6.1.1",
+    "numpy>=2.4.6",
     "pandas>=3.0.3",
     "playwright>=1.60.0",
     "pymysql>=1.2.0",
