@@ -73,15 +73,14 @@ PTT 信用卡版 ──[ptt_credit_card_crawler.py]──── MySQL (raw table
 
 | 類別 | 工具 | 狀態 |
 |------|------|------|
-| 語言／框架 | Python 3.12 | ✅ |
+| 金管會爬蟲 | Python | ✅ 完成 |
+| 各銀行官網爬蟲 | Python、Playwright | ✅ 完成 |
+| PTT 爬蟲 | Python | ✅ 完成 |
+| 資料清理管線 | Python、SQLAlchemy | ✅ 完成 |
+| 儀表板 | Python、Streamlit | ✅ 完成 |
+| 資料庫 | MySQL | ✅ |
 | 雲端平台 | GCP | ✅ |
 | 容器管理 | Portainer | ✅ |
-| 資料庫 | MySQL | ✅ |
-| 儀表板 | Streamlit | ✅ 完成 |
-| 金管會爬蟲 | — | ✅ 完成 |
-| 各銀行官網爬蟲 | Playwright | ✅ 完成 |
-| PTT 爬蟲 | — | ✅ 完成 |
-| 資料清理管線 | SQLAlchemy | ✅ 完成 |
 | 排程工作流 | Airflow | 🚧 處理中 |
 | 訊息佇列 | RabbitMQ | 🚧 處理中 |
 | 分散式爬蟲架構 | — | 🚧 處理中 |
@@ -91,6 +90,4 @@ PTT 信用卡版 ──[ptt_credit_card_crawler.py]──── MySQL (raw table
 ### ⚠️ 6. 注意事項
 
 - 資訊結果僅供參考，請依個人判斷做出合適決策
-- 爬蟲請勿過度頻繁請求，PTT 預設間隔 0.4 秒，請勿任意調低
-- 部分銀行官網有 WAF 防護（如中信），若動態爬取失敗會自動 fallback 至靜態清單
 - 請勿將密碼寫死於程式碼或提交至版控
