@@ -1,0 +1,43 @@
+version: '3.0'  # 對齊專案既有 yml 的版本寫法
+
+services:
+  api:  # 信用卡分散式爬蟲 API(查詢資料 + 派工觸發爬蟲)
+    # 用你自己的 registry / tag;沿用 worker yml 的命名空間 rfvwsx527
+    # 設定環境變數 DOCKER_IMAGE_VERSION 可切換版本,未設定預設 1.0
+    image: rfvwsx527/credit-card-api:${DOCKER_IMAGE_VERSION:-1.0}
+    hostname: "api.{{.Task.Slot}}"
+    # 程式實際位於 /api/api/main.py,模組路徑 api.main:app
+    command: bash -c "cd /api && uv run --env-file=.env uvicorn api.main:app --host 0.0.0.0 --port 8887"
+    ports:
+      - 8887:8887  # 容器 8887 → 主機 8887,瀏覽 http://<host>:8887/docs
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        # 在 node label api=true 的機器上執行
+        # docker node update --label-add api=true $(docker node ls -q)
+        constraints: [node.labels.api==true]
+    restart: always
+    environment:
+      - TZ=Asia/Taipei
+      # ── MySQL(與爬蟲共用同一個 DB)── 會覆寫映像內 .env ──
+      - MYSQL_HOST=mysql_mysql
+      - MYSQL_PORT=3306
+      - MYSQL_ACCOUNT=root
+      - MYSQL_PASSWORD=ppWgnb_mfGe2m_
+      - MYSQL_DB=mydb
+      # ── RabbitMQ(派工 broker + 佇列監控)──
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_ACCOUNT=worker
+      - RABBITMQ_PASSWORD=worker
+      - RABBITMQ_VHOST=/
+      - RABBITMQ_MGMT_PORT=15672
+      - CORS_ORIGINS=*
+    networks:
+      - my_swarm_network  # 與 mysql / rabbitmq / worker 同一張 overlay 網路
+
+networks:
+  my_swarm_network:
+    # 加入已存在的 overlay 網路(與爬蟲服務相同)
+    external: true

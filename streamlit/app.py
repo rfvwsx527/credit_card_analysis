@@ -112,6 +112,29 @@ h3 { margin-top: .2rem; }
 /* 4) 標題字級各縮小一號 */
 h1 { font-size: 2.1rem !important; }                                  /* 主標題 */
 [data-testid="stMainBlockContainer"] h3, .main h3 { font-size: 1.3rem !important; }  /* 圖表標題 */
+
+/* 5) 熱門貼文標題：不換行，讓「推噓數」篩選器能緊貼標題右側 */
+h3.hot-title { font-size: 1.3rem !important; font-weight: 600;
+               white-space: nowrap; margin: .2rem 0 0; }
+
+/* 6) 推噓數篩選器（滑桿）改成藍色：圓點、數值標籤、已選取軌道 */
+.st-key-t4_push div[data-baseweb="slider"] [role="slider"] {
+    background-color: #3b82f6 !important;
+}
+.st-key-t4_push div[data-baseweb="slider"] [data-testid="stSliderThumbValue"] {
+    color: #3b82f6 !important;
+}
+/* 已選取的填色軌道（bar）改成藍色（依實際 DOM）：
+   此版本的拖曳點(role=slider)就直接放在「軌道 div」裡面，所以軌道＝
+   「直接包住拖曳點的那個 div」。第二條則涵蓋另一種「軌道為拖曳點容器同層後續
+   元素」的版本；皆排除底部 min/max 標籤列（帶 data-testid），避免誤染。 */
+.st-key-t4_push div[data-baseweb="slider"] div:has(> [role="slider"]) {
+    background: #3b82f6 !important;
+}
+.st-key-t4_push div[data-baseweb="slider"]
+        div:has([role="slider"]) ~ div:not([data-testid]) {
+    background: #3b82f6 !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -161,11 +184,25 @@ def load_ptt():
 
 
 def fig_style(fig, h=360):
-    fig.update_layout(
-        height=h, margin=dict(l=10, r=10, t=30, b=10),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="Noto Sans TC, sans-serif"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+    is_pie = any(getattr(t, "type", "") == "pie" for t in fig.data)
+    if is_pie:
+        # 圓餅圖：圖例改放右側直式，並把圓餅縮到左側、開啟 automargin，
+        # 讓外圈百分比標籤留在自己的範圍內，避免與圖例（原本在上方）重疊。
+        fig.update_layout(
+            height=h, margin=dict(l=10, r=10, t=20, b=20),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="Noto Sans TC, sans-serif"),
+            legend=dict(orientation="v", yanchor="middle", y=0.5,
+                        xanchor="left", x=0.72, font=dict(size=15),
+                        itemsizing="constant", tracegroupgap=12))
+        fig.update_traces(selector=dict(type="pie"),
+                          domain=dict(x=[0.0, 0.68]), automargin=True)
+    else:
+        fig.update_layout(
+            height=h, margin=dict(l=10, r=10, t=30, b=10),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="Noto Sans TC, sans-serif"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
     fig.update_xaxes(showgrid=False)
     fig.update_yaxes(gridcolor="rgba(128,128,128,.2)")
     # 移除 plotly express 用陣列繪圖時自動產生的預設 "x"/"y" 軸標題；保留有意義者
@@ -438,12 +475,23 @@ months = sorted(stats["年月"].unique())              # 統計(KPI/排名)用�
 latest_data_month = months[-1]                              # 各資料中最晚有資料的月份
 last_month = months[-2] if len(months) >= 2 else months[-1]  # 「上個月」(倒數第二)
 
-# 趨勢滑桿時間軸：涵蓋所有時間序資料（stats + PTT）的最早～最晚，逐月補滿
-_time_vals = list(stats["年月"].dropna())
+# 趨勢滑桿時間軸：起點＝「各（有時間序的）資料表各自最早月份」中的最晚者，
+# 確保起點之後每張資料表都有資料，而非從只有單一表的早期月份（如 2015-01）開始；
+# 結束＝所有資料的最晚月份。
+def _month_periods(series):
+    return pd.PeriodIndex(
+        pd.to_datetime(series.dropna().astype(str), errors="coerce").dropna(),
+        freq="M")
+
+
+_period_sets = [_month_periods(stats["年月"])]
 if "年月" in ptt.columns:
-    _time_vals += list(ptt["年月"].dropna().astype(str))
+    _period_sets.append(_month_periods(ptt["年月"]))
+_period_sets = [p for p in _period_sets if len(p)]
+common_start = max(p.min() for p in _period_sets)   # 各表最早月份中的「最晚」者
+overall_end = max(p.max() for p in _period_sets)     # 所有資料的最晚月份
 trend_months = [str(p) for p in
-                pd.period_range(min(_time_vals), max(_time_vals), freq="M")]
+                pd.period_range(common_start, overall_end, freq="M")]
 
 
 # ----------------------------------------------------------------------
@@ -699,7 +747,8 @@ with tab3:
         pull = [0.08 if n == focus_cat else 0 for n in ct.index]
         fig = px.pie(values=ct.values, names=ct.index, hole=0.5,
                      color_discrete_sequence=PALETTE)
-        fig.update_traces(pull=pull,
+        fig.update_traces(pull=pull, direction="clockwise", sort=True,
+                          texttemplate="%{value}<br>%{percent}",
                           hovertemplate="主卡別：%{label}<br>卡片數：%{value} 張（%{percent}）<extra></extra>")
         show_selectable(fig, k_pie)
     with c2:
@@ -797,7 +846,9 @@ with tab4:
         cc = psub["分類"].value_counts()
         fig = px.pie(values=cc.values, names=cc.index, hole=0.5,
                      color_discrete_sequence=PALETTE)
-        fig.update_traces(hovertemplate="分類：%{label}<br>篇數：%{value}（%{percent}）<extra></extra>")
+        fig.update_traces(direction="clockwise", sort=True,
+                          texttemplate="%{value}<br>%{percent}",
+                          hovertemplate="分類：%{label}<br>篇數：%{value}（%{percent}）<extra></extra>")
         st.plotly_chart(fig_style(fig), use_container_width=True)
 
     c3, c4 = st.columns(2)
@@ -858,9 +909,10 @@ with tab4:
         st.info("資料表沒有內文欄位（content / 內文），無法產生文字雲。")
 
     # ── 熱門貼文表格：標題 + 推噓數篩選（並排），篩選直接作用於本表 ──
-    th, tf, _sp = st.columns([1.5, 1.5, 3], vertical_alignment="top")
+    th, tf, _sp = st.columns([1.1, 1.5, 4.4], vertical_alignment="top")
     with th:
-        st.subheader(f"{tg}熱門貼文 Top 10（依推噓數）")
+        st.markdown(f"<h3 class='hot-title'>{tg}熱門貼文 Top 10（依推噓數）</h3>",
+                    unsafe_allow_html=True)
     with tf:
         if has_push_filter:
             if "t4_push" not in st.session_state:

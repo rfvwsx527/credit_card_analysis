@@ -1,0 +1,20 @@
+[project]
+name = "credit-card-crawler-api"
+version = "1.0.0"
+description = "信用卡分散式爬蟲 FastAPI(資料查詢 + Celery/RabbitMQ 派工)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "sqlalchemy>=2.0.36",
+    "pymysql>=1.1.1",
+    "cryptography>=44.0.0",
+    "celery>=5.4.0",
+    "requests>=2.32.3",
+    "pydantic>=2.9.0",
+]
+
+[tool.uv]
+# 不需要把本套件當成可安裝的 distribution(直接 uv run 即可)
+package = false
