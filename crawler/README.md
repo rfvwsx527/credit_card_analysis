@@ -17,7 +17,7 @@ uv run playwright install chromium
 
 ### `scraper_banks.py`（各銀行官網）
 
-使用 Playwright 動態渲染，支援 10+ 家銀行，具備：
+使用 Playwright 動態渲染，支援 11 家銀行，具備：
 
 - **雙策略擷取**：JS 注入（卡名葉子節點偵測）+ href 連結比對，兩種方式互補
 - **反偵測強化**：抹除 `webdriver` 指紋、偽裝 UA / sec-ch-ua / WebGL，優先使用系統真實 Chrome
@@ -25,7 +25,21 @@ uv run playwright install chromium
 - **卡名雜訊過濾**：黑名單關鍵字、長度限制、標點密度過濾、結尾必須為「卡/Card」
 - **中信特殊處理**：中信官網有 WAF（APP-1053）防護，預設改讀 `ctbc_cards.csv` 靜態清單；加 `--ctbc-dynamic` 參數可嘗試動態爬取，抓到新卡自動寫回 CSV
 
-支援銀行代碼：`esun` `cathaybk` `taishin` `sinopac` `yuanta` `kgi` `dbs` `hsbc` `scb` `fubon` `ctbc`
+支援銀行：
+
+| 代碼 | 銀行名稱 | 爬取方式 |
+|------|---------|---------|
+| `esun` | 玉山銀行 | Playwright 動態 |
+| `cathaybk` | 國泰世華銀行 | Playwright 動態 |
+| `fubon` | 台北富邦銀行 | Playwright 動態 |
+| `taishin` | 台新銀行 | Playwright 動態 |
+| `sinopac` | 永豐銀行 | Playwright 動態 |
+| `yuanta` | 元大銀行 | Playwright 動態（含分頁） |
+| `kgi` | 凱基銀行 | Playwright 動態 |
+| `dbs` | 星展銀行 | Playwright 動態 |
+| `hsbc` | 滙豐銀行 | Playwright 動態 |
+| `scb` | 渣打銀行 | Playwright 動態 |
+| `ctbc` | 中國信託銀行 | 靜態清單（`ctbc_cards.csv`） |
 
 ```bash
 # 爬取全部銀行

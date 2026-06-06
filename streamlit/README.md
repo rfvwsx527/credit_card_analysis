@@ -1,140 +1,121 @@
-# 🏦 台灣信用卡資料爬蟲
+# 💳 信用卡市場分析儀表板（Streamlit）
 
-自動抓取台灣各大銀行信用卡資訊、金管會統計數據與 PTT 討論文章。
+讀取 MySQL 中清理後的信用卡資料，呈現台灣信用卡市場的發卡、競爭、產品、優惠與 PTT 社群聲量；社群聲量分頁並提供貼文內容**中文文字雲**與可篩選的熱門貼文清單。
 
 ---
 
-## 環境安裝
+## 資料來源
+
+MySQL `mydb` 內清理後的三張資料表（名稱可用環境變數覆寫）：
+
+| 用途 | 預設資料表 | 覆寫環境變數 | 內容 |
+|------|-----------|-------------|------|
+| 發卡統計 | `credit_card_stats_clean` | `TBL_STATS` | 金管會逐月發卡統計（流通卡數、簽帳金額、循環餘額、逾期率…） |
+| 銀行產品 | `banks_clean` | `TBL_BANKS` | 各銀行信用卡產品、卡片類型、回饋亮點、申辦連結 |
+| 社群聲量 | `ptt_credit_card_clean` | `TBL_PTT` | PTT 信用卡版貼文（標題、內文、分類、推噓數、年月、網址…） |
+
+> 執行前請先用清理程式建立上述 `*_clean` 資料表。
+
+---
+
+## 📊 儀表板分頁
+
+**頂部 KPI**：流通卡數、有效卡數、本月簽帳、循環餘額、統計機構數五張卡，前四張附**環比（MoM）變化**。
+
+| 分頁 | 主要內容 |
+|------|----------|
+| 📈 市場總覽 | 每月簽帳趨勢、流通卡數 vs 循環餘額、HHI 市場集中度、簽帳與流通卡數 Top N |
+| 🏦 機構競爭 | 簽帳市占率演變、逾期率趨勢、卡均簽帳金額排名、泡泡圖（簽帳 vs 流通卡數） |
+| 💬 社群聲量 | PTT 月貼文量、各銀行被提及次數、聲量隨時間變化、中文文字雲、熱門貼文 Top 10 |
+| 🃏 產品比較 | 卡別分布、各銀行平均回饋率、卡別 × 場景熱力圖、並排比較（最多 4 張） |
+| 🔍 優惠篩選 | 依銀行、卡別、適用場景、最低回饋率篩選，一鍵前往申辦頁面 |
+
+---
+
+## ▶️ 執行方式
+
+### 本機執行
 
 ```bash
-uv sync
-uv run playwright install chromium
+cd streamlit
+pip install -r requirements.txt
+export MYSQL_HOST=localhost MYSQL_PORT=3306 MYSQL_DB=mydb \
+       MYSQL_USER=root MYSQL_PASSWORD='你的密碼'
+streamlit run app.py
 ```
 
----
+開啟 <http://localhost:8501>。
 
-## 🕷️ 爬蟲說明與使用方式
+> 文字雲需要 `wordcloud`、`jieba` 及一套**中文字型**。本機若沒有 CJK 字型，可用環境變數 `WC_FONT_PATH` 指向字型檔（例如 Noto Sans CJK）。缺字型或套件時，文字雲會自動退回「高頻詞長條圖」，不會中斷。
 
-### `scraper_banks.py`（各銀行官網）
-
-使用 Playwright 動態渲染，支援 11 家銀行，具備：
-
-- **雙策略擷取**：JS 注入（卡名葉子節點偵測）+ href 連結比對，兩種方式互補
-- **反偵測強化**：抹除 `webdriver` 指紋、偽裝 UA / sec-ch-ua / WebGL，優先使用系統真實 Chrome
-- **導覽區排除**：自動跳過 nav / header / footer / sidebar，避免選單文字混入卡名
-- **卡名雜訊過濾**：黑名單關鍵字、長度限制、標點密度過濾、結尾必須為「卡/Card」
-- **中信特殊處理**：中信官網有 WAF（APP-1053）防護，預設改讀 `ctbc_cards.csv` 靜態清單；加 `--ctbc-dynamic` 參數可嘗試動態爬取，抓到新卡自動寫回 CSV
-
-支援銀行：
-
-| 代碼 | 銀行名稱 | 爬取方式 |
-|------|---------|---------|
-| `esun` | 玉山銀行 | Playwright 動態 |
-| `cathaybk` | 國泰世華銀行 | Playwright 動態 |
-| `fubon` | 台北富邦銀行 | Playwright 動態 |
-| `taishin` | 台新銀行 | Playwright 動態 |
-| `sinopac` | 永豐銀行 | Playwright 動態 |
-| `yuanta` | 元大銀行 | Playwright 動態（含分頁） |
-| `kgi` | 凱基銀行 | Playwright 動態 |
-| `dbs` | 星展銀行 | Playwright 動態 |
-| `hsbc` | 滙豐銀行 | Playwright 動態 |
-| `scb` | 渣打銀行 | Playwright 動態 |
-| `ctbc` | 中國信託銀行 | 靜態清單（`ctbc_cards.csv`） |
+### Docker Swarm 部署
 
 ```bash
-# 爬取全部銀行
-uv run python scraper_banks.py
+cd streamlit
 
-# 只爬單一銀行
-uv run python scraper_banks.py --bank esun
+# 1) 建立 overlay 網路
+docker network create -d overlay my_swarm_network 2>/dev/null || true
 
-# 開啟瀏覽器視窗（非 headless，方便偵錯）
-uv run python scraper_banks.py --show --debug
+# 2) 建置映像
+docker build -t credit-card-dashboard:1.0 .
 
-# 嘗試動態爬中信（有可能被 WAF 擋）
-uv run python scraper_banks.py --ctbc-dynamic
+# 3) 幫節點加上 label
+docker node update --label-add streamlit=true $(docker node ls -q)
+
+# 4) 部署
+docker stack deploy -c streamlit.yml streamlit
 ```
 
-輸出：`crawler_data/banks.csv`
+完成後開啟 <http://localhost:8501>。
 
----
+`streamlit.yml` 預設設定：
 
-### `fac_crawler.py`（金管會）
+- 連線宿主機 MySQL：`MYSQL_HOST=host.docker.internal`，以 `extra_hosts: host-gateway` 讓容器可連宿主機
+- `deploy`：`replicas: 1`、約束 `node.labels.streamlit==true`、失敗自動重啟
+- 對外埠 `8501:8501`
+- 映像內建 `fonts-noto-cjk`，文字雲可直接顯示中文
 
-直接下載金管會公開統計 CSV（`banking66.csv`），儲存至 `crawler_data/` 並同步寫入 MySQL。
+> ⚠️ `streamlit.yml` 內的 `MYSQL_PASSWORD` 為教學用明碼；正式環境請改用 **docker secret**，並更換已外洩的密碼。
+
+### 查看狀態 / 疑難排解
 
 ```bash
-uv run python fac_crawler.py
+docker service ls
+docker service ps streamlit_streamlit_dashboard --no-trunc
+docker service logs -f streamlit_streamlit_dashboard
 ```
 
-輸出：`crawler_data/credit_card_stats.csv`
+| 問題 | 原因與解法 |
+|------|-----------|
+| 服務一直 pending | 節點未加 `streamlit=true` label，或 overlay 網路未建立 |
+| 起來很慢 | 正常收斂過程，健康檢查 `start-period=20s`，約需 20～50 秒 |
+| 畫面顯示 DB 連不上 | 確認 `MYSQL_HOST` 與宿主機 MySQL 可連通 |
 
 ---
 
-### `ptt_credit_card_crawler.py`（PTT）
+## 互動與篩選
 
-爬取 PTT 信用卡版 2025 年至今的文章，功能包含：
-
-- 二分搜尋估算起始頁，縮短不必要的爬取時間
-- 批次寫入（每 100 筆存一次），兼顧效能與斷點保護
-- 連續 2 頁皆為舊文章自動停止
-- 支援斷點恢復（重跑 = 清空 MySQL 後重寫）
-
-可修改 `ptt_credit_card_crawler.py` 頂部的 `START_YEAR` 調整起始年份。
-
-```bash
-uv run python ptt_credit_card_crawler.py
-```
-
-輸出：`crawler_data/ptt_credit_card.csv`
+- **聚焦**：點選任一橫條／圓餅／泡泡圖，或使用側邊欄下拉，可將圖表鎖定到單一機構／銀行；側邊欄底部「顯示全部（清除所有聚焦）」一鍵還原
+- **側邊欄篩選**：機構類型、統計月份、趨勢觀察區間、排名顯示前 N 名
 
 ---
 
-## 🧹 資料清理（`clean_credit_cards.py`）
+## 名詞與計算說明
 
-將原始爬蟲資料清理、特徵工程後寫回 MySQL：
-
-| 原始表 | 清理後表 | 主要處理 |
-|--------|----------|----------|
-| `credit_card_stats` | `credit_card_stats_clean` | 民國年轉西元、數值欄轉型、計算淨增卡數、有效卡率、卡均簽帳金額 |
-| `banks` | `banks_clean` | 合併回饋亮點、解析最高回饋率（%）、卡別多標籤展開、適用場景關鍵字標記 |
-| `ptt_credit_card` | `ptt_credit_card_clean` | 推噓數正規化（「爆」→100、「Xn」→負數）、銀行關鍵字提及標記、年月欄位 |
-| — | `dashboard_agg` | 長表彙整（metric / dim / value），供儀表板 KPI 快取使用 |
-
-```bash
-# 清理並寫入（會 TRUNCATE 清理後的表再重寫，不動原始表）
-uv run python clean_credit_cards.py
-
-# 原始表還沒進 DB 時，從 CSV 自動建立
-SEED_FROM_CSV=1 CSV_DIR=./crawler_data uv run python clean_credit_cards.py
-```
+- **金額單位**：原始為「新臺幣百萬元」，圖表換算為「億元」（÷100）；卡數換算「萬張」（÷1e4）
+- **卡均簽帳金額**：本月簽帳金額 ÷ 有效卡數
+- **HHI**：各機構簽帳市占百分比的平方和，> 2500 一般視為高度集中
+- **社群聲量**：以關鍵字比對 PTT 標題＋內文是否「提及」該銀行（非情緒分析）
+- **卡片類型**：原始複合標籤以「/」拆成多標籤（現金回饋／紅利點數／哩程／聯名卡／高階卡／一般）
+- **適用場景**：依回饋亮點關鍵字比對（海外、旅遊、行動支付、加油、餐飲、超商、網購、影音等），一張卡可屬多場景
+- **最高回饋率**：從回饋亮點文字解析出的最大百分比；部分卡無明確數字故顯示「—」
 
 ---
 
-## 🗄️ 資料庫設定
+## 技術棧
 
-連線資訊優先讀取環境變數，未設定才用預設值：
-
-```bash
-export DB_HOST=localhost
-export DB_PORT=3306
-export DB_NAME=mydb
-export DB_USER=root
-export DB_PASSWORD=<your_password>
-```
-
-> ⚠️ 請勿將密碼寫死於程式碼或提交至版控。
+Streamlit · Plotly · pandas · SQLAlchemy + PyMySQL · wordcloud + jieba（中文文字雲）。容器以 Python 3.12-slim 為基底、`uv` 安裝套件、內建 Noto Sans CJK 字型。
 
 ---
 
-## 除錯截圖
-
-執行 `--debug` 後會產生各銀行全頁截圖（`debug_<代碼>.png`），用於確認網頁實際呈現內容與排查爬取問題。
-
----
-
-## 注意事項
-
-- PTT 爬蟲預設 0.4 秒請求間隔，請勿縮短
-- 中信（ctbc）預設使用 `ctbc_cards.csv` 靜態清單；官網改版時直接編輯 CSV 即可更新，動態爬取失敗時也會自動 fallback 至此清單
-- 部分銀行官網有 WAF 防護，若動態爬取失敗會自動 fallback 至靜態清單
+資料來源：金管會發卡統計 · 各銀行信用卡 · PTT 信用卡版
