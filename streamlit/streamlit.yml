@@ -1,8 +1,9 @@
 # Docker Swarm 部署方式：docker stack deploy -c streamlit.yml streamlit
 # 需先建立 overlay 網路（若尚未建立）：docker network create -d overlay my_swarm_network
 #
-# 前置：先在本機建置映像（單節點 Swarm 直接用本機映像；多節點需推送 registry）
-#   docker build -t credit-card-dashboard:1.0 .
+# 前置：建置映像並推送到 registry（跨節點適用）
+#   docker build -t rfvwsx527/credit-card-dashboard:1.0 .
+#   docker push rfvwsx527/credit-card-dashboard:1.0
 # 並先幫節點加上 streamlit label，約束才有節點可落：
 #   docker node update --label-add streamlit=true self   （self=目前節點；或在 Portainer 的 Node Labels 新增）
 #
@@ -11,11 +12,11 @@ version: '3'  # compose 檔版本（3 以上支援 Swarm 部署）
 services:
 
   streamlit_dashboard:  # 信用卡市場分析儀表板服務
-    image: credit-card-dashboard:1.0  # 由本目錄 Dockerfile 建置的本機映像
+    image: rfvwsx527/credit-card-dashboard:1.0  # registry 映像（跨節點適用；與爬蟲統一）
     hostname: "streamlit_dashboard"
     environment:
       TZ: Asia/Taipei                   # 時區台北
-      MYSQL_HOST: host.docker.internal  # 宿主機 MySQL；若 DB 也在 swarm 內請改成該服務名
+      MYSQL_HOST: mysql_mysql           # MySQL swarm 服務名（與爬蟲共用同一個 DB；須在同一 overlay 網路）
       MYSQL_PORT: '3306'
       MYSQL_DB: mydb
       MYSQL_USER: root
@@ -25,10 +26,8 @@ services:
       TBL_PTT: ptt_credit_card_clean
     ports:
       - 8501:8501  # 對外開放 Streamlit Web 介面（http://localhost:8501）
-    extra_hosts:
-      - "host.docker.internal:host-gateway"  # 讓容器可連到宿主機（連宿主機 MySQL 用）
     networks:
-      - my_swarm_network  # 加入 overlay 網路（與其他服務一致）
+      - my_swarm_network  # 與 MySQL/其他服務同一 overlay 網路（才能用服務名 mysql_mysql 連線）
     deploy:
       mode: replicated
       replicas: 1
