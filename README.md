@@ -74,6 +74,7 @@
 │   │   ├── tasks_ptt.py / tasks_banks.py / tasks_fac.py        # 任務定義
 │   │   └── producer_ptt.py / producer_banks.py / producer_card_stats.py  # 派工
 │   ├── Dockerfile
+│   ├── mysql.yml                                   # MySQL 8 + phpMyAdmin（Swarm）
 │   ├── docker-compose-card-crawler-worker.yml      # Swarm worker
 │   └── docker-compose-card-crawler-producer.yml    # Swarm producer
 ├── rabbitmq.yml                        # RabbitMQ + Flower

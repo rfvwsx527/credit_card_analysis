@@ -37,6 +37,7 @@ uv run playwright install chromium
 |------|------|
 | 容器平台 | Docker Desktop / Docker Engine（已啟用 **Swarm 模式**） |
 | 容器管理 | Portainer |
+| 資料庫 | MySQL `mysql:8.0`（swarm 服務 `mysql_mysql` / 資料庫 `mydb`，由 `mysql.yml` 部署） |
 | 訊息佇列 | RabbitMQ `3.6-management-alpine`（含管理介面 `:15672`） |
 | 任務監控 | Flower `mher/flower:2.0.0`（`:5555`） |
 | overlay 網路 | `my_swarm_network`（需事先 `docker network create -d overlay`） |
@@ -159,7 +160,22 @@ uv run python ptt_credit_card_crawler.py
 
 ### 啟動步驟
 
-> 前置：Swarm 已啟用、overlay 網路 `my_swarm_network` 已建、MySQL（swarm 服務 `mysql_mysql` / 資料庫 `mydb`）在同一網路。
+> 前置：Swarm 已啟用、overlay 網路 `my_swarm_network` 已建。MySQL 也以 swarm 服務部署（服務名 `mysql_mysql` / 資料庫 `mydb`），與爬蟲在同一網路。
+
+**MySQL（與爬蟲共用同一個 DB）**：若尚未部署，用 `mysql.yml`（MySQL 8 + phpMyAdmin）：
+
+```bash
+# 1) 先建立 external volume（mysql.yml 的 volume 設為 external，不會自動建）
+docker volume create mysql
+
+# 2) 部署 MySQL + phpMyAdmin（約束為 manager 節點，不需貼 label）
+docker stack deploy -c mysql.yml mysql
+# 服務名 mysql_mysql；phpMyAdmin 介面 http://localhost:8080；資料持久化於 volume `mysql`
+```
+
+> 已有 `mysql_mysql` 在跑就跳過。爬蟲 / producer 的 yml 內 `DB_HOST=mysql_mysql` 即指向它（須同在 `my_swarm_network`）。
+
+接著依序啟動其餘服務：
 
 ```bash
 # ① RabbitMQ + Flower
