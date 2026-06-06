@@ -24,7 +24,40 @@
 
 ---
 
-### 📁 3. 專案結構
+### 🧰 3. 需求環境
+
+**基礎環境**
+
+| 項目 | 需求 |
+|------|------|
+| 作業系統 | macOS（Apple Silicon）或 Linux |
+| 容器平台 | Docker Desktop / Docker Engine（已啟用 **Swarm 模式**） |
+| 容器管理 | Portainer |
+| Python | 3.12+（本機跑清理程式用） |
+| 套件管理 | uv（或 pip） |
+| overlay 網路 | `my_swarm_network`（需事先 `docker network create -d overlay`） |
+
+**服務（以容器部署於 Swarm）**
+
+| 服務 | 映像 | 用途 |
+|------|------|------|
+| MySQL | `mysql:8.0` | 資料庫 `mydb`（raw / clean tables） |
+| RabbitMQ | `rabbitmq:3.6-management-alpine` | 任務佇列（broker），含管理介面 `:15672` |
+| Flower | `mher/flower:2.0.0` | Celery 任務監控 `:5555` |
+| 爬蟲映像 | 自建 `credit-card-crawler`（含 Playwright/chromium） | worker / producer |
+| 儀表板 | 自建 `credit-card-dashboard`（Streamlit） | 視覺化 `:8501` |
+
+**主要 Python 套件**
+
+- 分散式 / 爬蟲：`celery`、`pika`、`requests`、`beautifulsoup4`、`playwright`（+ chromium）
+- 資料庫 / 處理：`sqlalchemy`、`pymysql`、`cryptography`、`pandas`、`numpy`
+- 儀表板：`streamlit`、`plotly`
+
+> 各子目錄（`crawler_dist/`、`streamlit/`）的 `requirements.txt` 已列明完整套件版本；映像由各自的 `Dockerfile` 建置。
+
+---
+
+### 📁 4. 專案結構
 
 ```
 .
@@ -54,7 +87,7 @@
 
 ---
 
-### ⚙️ 4. 系統架構與資料流程
+### ⚙️ 5. 系統架構與資料流程
 
 採 **Celery + RabbitMQ** 的「派工 / 消費」模式，部署於 **Docker Swarm**、由 **Portainer** 管理；
 爬完寫入 MySQL → 清理 → Streamlit 儀表板。
@@ -116,7 +149,7 @@
 
 ---
 
-### 🛠️ 5. 使用工具與開發進度
+### 🛠️ 6. 使用工具與開發進度
 
 | 類別 | 工具 | 狀態 |
 |------|------|------|
@@ -135,7 +168,7 @@
 
 ---
 
-### ⚠️ 6. 注意事項
+### ⚠️ 7. 注意事項
 
 - 資訊結果僅供參考，請依個人判斷做出合適決策
 - 請勿將密碼寫死於程式碼或提交至版控

@@ -18,6 +18,37 @@ MySQL `mydb` 內清理後的三張資料表（名稱可用環境變數覆寫）�
 
 ---
 
+## 🧰 需求環境
+
+**本機執行**
+
+| 項目 | 需求 |
+|------|------|
+| 作業系統 | macOS（Apple Silicon）或 Linux |
+| Python | 3.12+ |
+| 資料庫 | MySQL 8（資料庫 `mydb`，且已建立 `*_clean` 清理後資料表） |
+| 中文字型 | 文字雲需 CJK 字型；本機若無，用 `WC_FONT_PATH` 指向字型檔（如 Noto Sans CJK） |
+
+**Docker 部署額外需求**
+
+| 項目 | 需求 |
+|------|------|
+| 容器平台 | Docker Desktop / Docker Engine（已啟用 **Swarm 模式**） |
+| 容器管理 | Portainer（可選，用於介面管理） |
+| overlay 網路 | `my_swarm_network`（需事先 `docker network create -d overlay`） |
+| 節點 label | `streamlit=true`（服務約束用） |
+| 字型 | 映像已內建 `fonts-noto-cjk`，文字雲可直接顯示中文 |
+
+**主要 Python 套件**
+
+- 介面 / 圖表：`streamlit`、`plotly`、`pandas`
+- 資料庫：`sqlalchemy`、`pymysql`、`cryptography`
+- 中文文字雲：`wordcloud`、`jieba`
+
+> 完整套件版本見 `requirements.txt`；映像由 `Dockerfile` 建置（Python 3.12-slim + uv，內建 Noto Sans CJK 字型）。
+
+---
+
 ## 📊 儀表板分頁
 
 **頂部 KPI**：流通卡數、有效卡數、本月簽帳、循環餘額、統計機構數五張卡，前四張附**環比（MoM）變化**。

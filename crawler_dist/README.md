@@ -13,6 +13,39 @@ uv run playwright install chromium
 
 ---
 
+## 🧰 需求環境
+
+**單機執行（直接跑爬蟲）**
+
+| 項目 | 需求 |
+|------|------|
+| 作業系統 | macOS（Apple Silicon）或 Linux |
+| Python | 3.12+ |
+| 套件管理 | uv（或 pip） |
+| 瀏覽器核心 | Playwright chromium（`uv run playwright install chromium`，銀行爬蟲用） |
+| 資料庫 | MySQL 8（資料庫 `mydb`，可選；無 DB 時仍會輸出 CSV） |
+
+**主要 Python 套件**
+
+- 爬蟲：`requests`、`beautifulsoup4`、`playwright`（+ chromium）
+- 資料庫：`sqlalchemy`、`pymysql`、`cryptography`
+- 資料處理：`pandas`
+
+**分散式部署額外需求**（見下方「分散式爬蟲」章節）
+
+| 項目 | 需求 |
+|------|------|
+| 容器平台 | Docker Desktop / Docker Engine（已啟用 **Swarm 模式**） |
+| 容器管理 | Portainer |
+| 訊息佇列 | RabbitMQ `3.6-management-alpine`（含管理介面 `:15672`） |
+| 任務監控 | Flower `mher/flower:2.0.0`（`:5555`） |
+| overlay 網路 | `my_swarm_network`（需事先 `docker network create -d overlay`） |
+| 額外套件 | `celery`、`pika`（打包進爬蟲映像） |
+
+> 完整套件版本見 `requirements.txt`；映像由 `Dockerfile` 建置。
+
+---
+
 ## 🕷️ 爬蟲說明與使用方式
 
 ### `scraper_banks.py`（各銀行官網）
