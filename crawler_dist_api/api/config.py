@@ -57,6 +57,7 @@ TABLE_AGG = os.getenv("DST_AGG", "dashboard_agg")
 
 # ── Celery 任務名稱 / 佇列(必須與 crawler/worker.py 完全一致)──────────
 TASK_PTT = "crawler.tasks_ptt.crawl_ptt_page"
+TASK_PTT_ALL = "crawler.tasks_ptt.crawl_ptt_all"   # 全爬啟動任務(自動估算頁數)
 TASK_BANKS = "crawler.tasks_banks.crawl_bank"
 TASK_STATS = "crawler.tasks_fac.crawl_card_stats"
 QUEUE_PTT = "ptt"

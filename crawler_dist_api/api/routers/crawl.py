@@ -66,6 +66,20 @@ def crawl_ptt(body: CrawlPttIn):
         detail=f"已派工第 {body.start_page}~{body.end_page} 頁,共 {len(ids)} 個任務")
 
 
+@router.post("/ptt/all", response_model=CrawlOut,
+             summary="派工:PTT 全部(自動估算頁數,等同重觸發 producer)")
+def crawl_ptt_all():
+    """送出一個『啟動任務』給 worker:由 worker(有 PTT 模組)自動清空表、
+    估算 START_YEAR 起始頁、再把每一頁派成 crawl_ptt_page 任務。
+    等同 `docker service update --force card_producer_card_producer_ptt`,但走 API。
+    清空與派工都在該啟動任務內完成,API 端不先清空。"""
+    tid = tasking.send_task(config.TASK_PTT_ALL, config.QUEUE_PTT, [])
+    return CrawlOut(
+        enqueued=1, queue=config.QUEUE_PTT, truncated=False, task_ids=[tid],
+        detail=("已送出『PTT 全爬』啟動任務;worker 會自動估算頁數並派工"
+                "(清空 ptt 表由該任務負責)。實際每頁任務數可用 /crawl/queues 觀察。"))
+
+
 @router.post("/stats", response_model=CrawlOut, summary="派工:金管會統計(單一任務)")
 def crawl_stats():
     # stats 任務內部自行 truncate→write,這裡不先清空
