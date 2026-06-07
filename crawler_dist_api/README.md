@@ -67,71 +67,17 @@ api/                              # build context（對應容器內 /api）
 > 查詢優先讀清理表（`*_clean` / `dashboard_agg`）；清理表還沒建時自動退回原始表。
 > 欄位保留原始中文名稱（與 DB 一致）。
 
-#### `/api/v1/ptt` 參數與回傳欄位
-
-**內容相關參數**
-
-| 參數 | 型別 | 預設 | 說明 |
-|------|------|------|------|
-| `include_content` | bool | `false` | 是否回傳貼文內容 `content`。內文很長，列表預設不帶；要看全文請設 `true` |
-| `q` | string | — | 貼文標題 `title` 關鍵字（模糊比對） |
-| `category` | string | — | 分類（如 `心得` / `情報` / `問題`） |
-| `year_month` | string | — | 年月，如 `2025-03` |
-| `limit` / `offset` | int | `30` / `0` | 分頁 |
-
-**回傳欄位（每筆 `rows`）**
-
-| 欄位 | 對應 | 何時出現 |
-|------|------|----------|
-| `title` | **貼文標題** | 一律回傳 |
-| `content` | **貼文內容（全文）** | 僅當 `include_content=true` |
-| `author` | 作者 | 一律回傳 |
-| `pub_dt` / `pub_time` | 發文時間 | 一律回傳 |
-| `分類` / `category` | 分類 | 一律回傳 |
-| `push_count` / `推噓數` | 推噓數 | 一律回傳 |
-| `url` | 原文連結 | 一律回傳 |
-
-> 標題（`title`）永遠都在；內容（`content`）需加 `?include_content=true` 才回傳（避免列表回應過大）。
-
-**範例：同時取標題與內容**
-
-```bash
-curl "http://localhost:8887/api/v1/ptt?include_content=true&limit=10"
-```
-
-```json
-{
-  "table": "ptt_credit_card_clean",
-  "total": 273,
-  "limit": 10,
-  "offset": 0,
-  "rows": [
-    {
-      "title": "[心得] CUBE 卡實用心得",
-      "content": "最近辦了 CUBE 卡，分享一下……（完整內文）",
-      "author": "someuser",
-      "pub_dt": "2025-03-01 10:00:00",
-      "分類": "心得",
-      "push_count": "爆",
-      "url": "https://www.ptt.cc/bbs/creditcard/M.xxxx.A.xxx.html"
-    }
-  ]
-}
-```
-
-
+### 爬蟲控制（POST / GET）
 
 | 端點 | 方法 | 說明 |
 |------|------|------|
 | `/api/v1/crawl/queues` | GET | 查 `ptt`/`banks`/`card_stats` 三佇列深度（皆 0 = 爬完） |
 | `/api/v1/crawl/banks` | POST | 清空 `banks` → 每家銀行派一個任務（body 可指定 `codes`） |
 | `/api/v1/crawl/ptt` | POST | 清空 `ptt` → 指定頁碼範圍派工（body `start_page`/`end_page`） |
-| `/api/v1/crawl/ptt/all` | POST | 清空 `ptt` → **自動估算頁數**全爬（等同重觸發 producer，無需 body） |
 | `/api/v1/crawl/stats` | POST | 派一個金管會統計任務 |
 
 > 行為對齊既有 producer：**派工前清空一次，worker 全程只 append**。
-> `/crawl/ptt` 需指定頁碼範圍（適合補爬某段）；要**全爬**用 `/crawl/ptt/all`，由 worker 自動估算頁數。
-> 註：`/ptt/all` 的估算邏輯在 worker 端執行，需 worker 映像含 `crawler.tasks_ptt.crawl_ptt_all` 任務（見專案 tasks_ptt.py）。
+> PTT 需指定頁碼範圍（API 映像不含 ptt 估算模組）；要全自動估算頁數請改觸發既有的 `card_producer` 服務。
 
 **範例**
 
@@ -147,10 +93,6 @@ curl -X POST http://localhost:8887/api/v1/crawl/banks \
 # 派工 PTT 第 1~20 頁
 curl -X POST http://localhost:8887/api/v1/crawl/ptt \
   -H 'Content-Type: application/json' -d '{"start_page":1,"end_page":20}'
-
-# 全爬 PTT（自動估算頁數，最省事）
-curl -X POST http://localhost:8887/api/v1/crawl/ptt/all \
-  -H 'Content-Type: application/json'
 
 # 看佇列是否歸 0
 curl http://localhost:8887/api/v1/crawl/queues
