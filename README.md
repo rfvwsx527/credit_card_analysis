@@ -24,7 +24,38 @@
 
 ---
 
-### 🧰 3. 需求環境
+### 📁 3. 專案結構
+
+```
+.
+├── crawler_dist/                       # 分散式爬蟲（Celery + RabbitMQ + Swarm）
+│   ├── scraper_banks.py                # 各銀行官網爬蟲（Playwright）
+│   ├── fac_crawler.py                  # 金管會統計資料爬蟲
+│   ├── ptt_credit_card_crawler.py      # PTT 信用卡版爬蟲
+│   ├── ctbc_cards.py / ctbc_cards.csv  # 中信卡片清單（CSV 後備 + 自動同步）
+│   ├── card_common.py                  # 爬蟲共用模組
+│   ├── db_common.py                    # MySQL 讀寫共用模組
+│   ├── clean_credit_cards.py           # 資料清理 → 寫回 MySQL
+│   ├── crawler/                        # Celery 套件
+│   │   ├── worker.py                   # Celery app（佇列路由）
+│   │   ├── tasks_ptt.py / tasks_banks.py / tasks_fac.py        # 任務定義
+│   │   └── producer_ptt.py / producer_banks.py / producer_card_stats.py  # 派工
+│   ├── Dockerfile
+│   ├── mysql.yml                                   # MySQL 8 + phpMyAdmin（Swarm）
+│   ├── docker-compose-card-crawler-worker.yml      # Swarm worker
+│   └── docker-compose-card-crawler-producer.yml    # Swarm producer
+├── rabbitmq.yml                        # RabbitMQ + Flower
+├── streamlit/                          # Streamlit 互動式儀表板
+│   ├── app.py                          # 儀表板主程式（讀 clean tables）
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   └── streamlit.yml                   # Swarm 部署
+└── crawler_data/                       # 爬蟲輸出（CSV 備份）
+```
+
+---
+
+### 🧰 4. 需求環境
 
 **基礎環境**
 
@@ -54,37 +85,6 @@
 - 儀表板：`streamlit`、`plotly`
 
 > 各子目錄（`crawler_dist/`、`streamlit/`）的 `requirements.txt` 已列明完整套件版本；映像由各自的 `Dockerfile` 建置。
-
----
-
-### 📁 4. 專案結構
-
-```
-.
-├── crawler_dist/                       # 分散式爬蟲（Celery + RabbitMQ + Swarm）
-│   ├── scraper_banks.py                # 各銀行官網爬蟲（Playwright）
-│   ├── fac_crawler.py                  # 金管會統計資料爬蟲
-│   ├── ptt_credit_card_crawler.py      # PTT 信用卡版爬蟲
-│   ├── ctbc_cards.py / ctbc_cards.csv  # 中信卡片清單（CSV 後備 + 自動同步）
-│   ├── card_common.py                  # 爬蟲共用模組
-│   ├── db_common.py                    # MySQL 讀寫共用模組
-│   ├── clean_credit_cards.py           # 資料清理 → 寫回 MySQL
-│   ├── crawler/                        # Celery 套件
-│   │   ├── worker.py                   # Celery app（佇列路由）
-│   │   ├── tasks_ptt.py / tasks_banks.py / tasks_fac.py        # 任務定義
-│   │   └── producer_ptt.py / producer_banks.py / producer_card_stats.py  # 派工
-│   ├── Dockerfile
-│   ├── mysql.yml                                   # MySQL 8 + phpMyAdmin（Swarm）
-│   ├── docker-compose-card-crawler-worker.yml      # Swarm worker
-│   └── docker-compose-card-crawler-producer.yml    # Swarm producer
-├── rabbitmq.yml                        # RabbitMQ + Flower
-├── streamlit/                          # Streamlit 互動式儀表板
-│   ├── app.py                          # 儀表板主程式（讀 clean tables）
-│   ├── requirements.txt
-│   ├── Dockerfile
-│   └── streamlit.yml                   # Swarm 部署
-└── crawler_data/                       # 爬蟲輸出（CSV 備份）
-```
 
 ---
 
@@ -145,7 +145,7 @@
 | 容器管理 | **Portainer / Docker Swarm** | 部署與管理所有服務（worker / producer / RabbitMQ / 儀表板） |
 
 詳細說明請參閱子目錄的 README：
-- 爬蟲（含分散式部署與監控）：[crawler/README.md](./crawler/README.md)
+- 爬蟲（含分散式部署與監控）：[crawler_dist/README.md](./crawler_dist/README.md)
 - 儀表板：[streamlit/README.md](./streamlit/README.md)
 
 ---

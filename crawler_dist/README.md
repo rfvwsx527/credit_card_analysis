@@ -4,6 +4,43 @@
 
 ---
 
+## 📁 專案結構
+
+```
+crawler_dist/
+├── scraper_banks.py                # 各銀行官網爬蟲（Playwright 動態渲染，11 家）
+├── fac_crawler.py                  # 金管會統計資料爬蟲（下載 banking66.csv）
+├── ptt_credit_card_crawler.py      # PTT 信用卡版爬蟲
+├── ctbc_cards.py                   # 中信卡片清單處理（CSV 後備 + 自動同步）
+├── ctbc_cards.csv                  # 中信卡片靜態清單（WAF 防護時的 fallback）
+├── card_common.py                  # 爬蟲共用模組
+├── db_common.py                    # MySQL 讀寫共用模組
+├── clean_credit_cards.py           # 資料清理 + 特徵工程 → 寫回 MySQL
+├── crawler/                        # Celery 分散式套件
+│   ├── config.py                   # 連線與資料表設定（全走環境變數）
+│   ├── worker.py                   # Celery app（佇列路由）
+│   ├── tasks_ptt.py                # PTT 任務定義
+│   ├── tasks_banks.py              # 各銀行任務定義
+│   ├── tasks_fac.py                # 金管會任務定義
+│   ├── producer_ptt.py             # PTT 派工程式
+│   ├── producer_banks.py           # 各銀行派工程式
+│   └── producer_card_stats.py      # 金管會派工程式
+├── Dockerfile                      # 爬蟲映像（含 Playwright/chromium）
+├── mysql.yml                       # MySQL 8 + phpMyAdmin（Swarm）
+├── rabbitmq.yml                    # RabbitMQ + Flower（Swarm，任務佇列與監控）
+├── docker-compose-card-crawler-worker.yml      # Swarm worker 部署
+├── docker-compose-card-crawler-producer.yml    # Swarm producer 部署
+├── requirements.txt                # Python 套件版本清單
+├── pyproject.toml / uv.lock        # uv 專案設定與鎖定檔
+├── debug_*.png                     # 各銀行除錯截圖（--debug 產生）
+├── scraper_banks.log               # 銀行爬蟲執行日誌
+└── README.md                       # 本說明文件
+```
+
+> 單機執行時直接跑各 `*_crawler.py` / `scraper_banks.py`；分散式部署則透過 `crawler/` 內的 producer 派工、worker 消費（詳見下方「分散式爬蟲」章節），佇列與監控由 `rabbitmq.yml`（RabbitMQ + Flower）提供。
+
+---
+
 ## 環境安裝
 
 ```bash

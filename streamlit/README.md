@@ -18,6 +18,21 @@ MySQL `mydb` 內清理後的三張資料表（名稱可用環境變數覆寫）�
 
 ---
 
+## 📁 專案結構
+
+```
+streamlit/
+├── app.py               # 主程式：Streamlit 儀表板（所有分頁、圖表、互動邏輯）
+├── requirements.txt     # Python 套件版本清單
+├── Dockerfile           # 容器建置：Python 3.12-slim + uv + Noto Sans CJK 字型
+├── streamlit.yml        # Docker Swarm Stack 設定（服務、環境變數、網路、部署）
+└── README.md            # 本說明文件
+```
+
+> `app.py` 為單一檔案架構，所有邏輯（DB 連線、資料處理、頁面渲染）集中於此，方便快速部署與修改。
+
+---
+
 ## 🧰 需求環境
 
 **本機執行**
