@@ -1,4 +1,4 @@
-# 分散式爬蟲 API（FastAPI + Docker Swarm）
+# 信用卡分散式爬蟲 API（FastAPI + Docker Swarm）
 
 在原本的「Celery + RabbitMQ + Docker Swarm」信用卡爬蟲之上，加一層 **FastAPI 服務**：
 

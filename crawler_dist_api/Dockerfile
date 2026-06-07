@@ -19,9 +19,10 @@ RUN uv sync --no-dev || uv sync
 # 複製套件原始碼:程式在 /api/api/*,模組路徑 api.main:app
 COPY api/ ./api/
 
-# 提供一份預設 .env,讓 `uv run --env-file=.env` 不會因檔案缺失而失敗;
-# swarm 的 environment: 會覆寫這些值。
-COPY .env.example ./.env
+# 在映像內建一份空的 .env,讓 `uv run --env-file=.env` 不會因檔案缺失而失敗。
+# 實際連線值由 swarm compose 的 environment:(或 docker run -e)注入;
+# 都沒給時,api/config.py 內的預設值會生效。
+RUN touch .env
 
 ENV PYTHONUNBUFFERED=1 TZ=Asia/Taipei PYTHONPATH=/api
 
