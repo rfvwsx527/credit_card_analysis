@@ -3,3 +3,4 @@ crawler_data/
 __pycache__/
 *.pyc
 crawler_dist/＊.png
+architecture_diagram/*.key
