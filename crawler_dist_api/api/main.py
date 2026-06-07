@@ -11,6 +11,7 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from api import __version__, config, db
 from api.schemas import HealthOut
@@ -20,12 +21,21 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
+
+class UTF8JSONResponse(JSONResponse):
+    """明確在 Content-Type 帶上 charset=utf-8。
+    FastAPI 預設回 `application/json`(無 charset),Safari 等瀏覽器在
+    zh-TW 環境會用 Big5 去解 UTF-8 位元組 → 中文變亂碼。指定 charset 即可正常。"""
+    media_type = "application/json; charset=utf-8"
+
+
 app = FastAPI(
     title="信用卡分散式爬蟲 API",
     version=__version__,
     description=(
         "查詢台灣各大銀行信用卡、PTT 討論、金管會發卡統計資料,"
         "並可透過 RabbitMQ 派工觸發 Celery + Docker Swarm 分散式爬蟲。"),
+    default_response_class=UTF8JSONResponse,  # 全站回應都帶 charset=utf-8
 )
 
 app.add_middleware(
