@@ -2,7 +2,7 @@
 
 > 整體架構：核心資料管線已完成 ✅
 
-![整體架構圖](./architecture.png)
+![整體架構圖](./architecture_diagram.png)
 
 ## 架構概覽
 
@@ -18,12 +18,6 @@
 
 ## 資料流
 
-```mermaid
-flowchart LR
-    A[Apache Airflow<br/>排程管理] --> B[RabbitMQ · Celery<br/>爬蟲 Request · Flower<br/>資料收集]
-    B --> C[MySQL<br/>資料儲存]
-    C --> D[FastAPI<br/>資料讀取]
-    D --> E[Streamlit<br/>視覺化]
-```
+![資料流](./flow_diagram.png)
 
 Airflow 觸發收集任務，透過 RabbitMQ 與 Celery 分派給爬蟲執行（Flower 負責監控），結果寫入 MySQL；FastAPI 從資料庫讀取資料對外提供，最終由 Streamlit 呈現視覺化結果。
