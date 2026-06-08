@@ -164,8 +164,8 @@
 | 儀表板 | Python、Streamlit | ✅ 完成 |
 | 資料庫 | MySQL | ✅ 完成 |
 | 容器管理 | Portainer、Docker Swarm | ✅ 完成 |
+| 排程工作流 | Airflow(目前是APScheduler) | 🚧 處理中 |
 | 雲端平台 | GCP | 🚧 處理中 |
-| 排程工作流 | Airflow | 🚧 處理中 |
 
 ---
 
