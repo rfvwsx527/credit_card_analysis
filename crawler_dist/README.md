@@ -24,20 +24,22 @@ crawler_dist/
 │   ├── tasks_fac.py                # 金管會任務定義
 │   ├── producer_ptt.py             # PTT 派工程式
 │   ├── producer_banks.py           # 各銀行派工程式
-│   └── producer_card_stats.py      # 金管會派工程式
-├── Dockerfile                      # 爬蟲映像（含 Playwright/chromium）
+│   ├── producer_card_stats.py      # 金管會派工程式
+│   └── scheduler.py                # ⭐ 每晚排程器（派工 → 等爬完 → 清理）
+├── Dockerfile                      # 爬蟲映像（含 Playwright/chromium、排程器、清理程式）
 ├── mysql.yml                       # MySQL 8 + phpMyAdmin（Swarm）
 ├── rabbitmq.yml                    # RabbitMQ + Flower（Swarm，任務佇列與監控）
 ├── docker-compose-card-crawler-worker.yml      # Swarm worker 部署
 ├── docker-compose-card-crawler-producer.yml    # Swarm producer 部署
-├── requirements.txt                # Python 套件版本清單
+├── docker-compose-card-scheduler.yml           # ⭐ Swarm 排程器部署（每晚 21:00）
+├── requirements.txt                # Python 套件版本清單（含 celery / apscheduler / loguru）
 ├── pyproject.toml / uv.lock        # uv 專案設定與鎖定檔
 ├── debug_*.png                     # 各銀行除錯截圖（--debug 產生）
 ├── scraper_banks.log               # 銀行爬蟲執行日誌
 └── README.md                       # 本說明文件
 ```
 
-> 單機執行時直接跑各 `*_crawler.py` / `scraper_banks.py`；分散式部署則透過 `crawler/` 內的 producer 派工、worker 消費（詳見下方「分散式爬蟲」章節），佇列與監控由 `rabbitmq.yml`（RabbitMQ + Flower）提供。
+> 單機執行時直接跑各 `*_crawler.py` / `scraper_banks.py`；分散式部署則透過 `crawler/` 內的 producer 派工、worker 消費（詳見下方「分散式爬蟲」章節），佇列與監控由 `rabbitmq.yml`（RabbitMQ + Flower）提供。每晚自動化（爬蟲 → 清理）則由 `crawler/scheduler.py` 排程（見「排程自動化」章節）。
 
 ---
 
@@ -67,6 +69,7 @@ uv run playwright install chromium
 - 爬蟲：`requests`、`beautifulsoup4`、`playwright`（+ chromium）
 - 資料庫：`sqlalchemy`、`pymysql`、`cryptography`
 - 資料處理：`pandas`
+- 分散式與排程：`celery`、`pika`、`apscheduler`、`loguru`
 
 **分散式部署額外需求**（見下方「分散式爬蟲」章節）
 
@@ -78,9 +81,9 @@ uv run playwright install chromium
 | 訊息佇列 | RabbitMQ `3.6-management-alpine`（含管理介面 `:15672`） |
 | 任務監控 | Flower `mher/flower:2.0.0`（`:5555`） |
 | overlay 網路 | `my_swarm_network`（需事先 `docker network create -d overlay`） |
-| 額外套件 | `celery`、`pika`（打包進爬蟲映像） |
+| 額外套件 | `celery`、`pika`、`apscheduler`、`loguru`（打包進爬蟲映像） |
 
-> 完整套件版本見 `requirements.txt`；映像由 `Dockerfile` 建置。
+> 完整套件版本見 `requirements.txt`；映像由 `Dockerfile` 建置（套件以 **uv** 安裝）。
 
 ---
 
@@ -274,6 +277,83 @@ docker service logs card_producer_card_producer_ptt --tail 15   # 「已派工 N
 
 ---
 
+## ⏰ 排程自動化（每晚 21:00 自動爬蟲 → 清理）
+
+把「分散式爬蟲」與「資料清理」串成一條**每晚自動執行**的流程，由 `crawler/scheduler.py`（APScheduler 常駐排程器）負責。每天 **21:00（Asia/Taipei）** 觸發一次：
+
+```
+21:00  ① 派工：沿用 producer，清空三張原始表各一次 → 任務送進 ptt / banks / card_stats 佇列
+        ② 等待：輪詢「佇列深度 + worker 進行中任務」，直到全部清空（= 爬完）
+        ③ 清理：執行 clean_credit_cards.py → 寫入 *_clean / dashboard_agg（原始表不動）
+```
+
+### 設計重點
+
+- 排程器只做「派工 + 等待 + 清理」，**真正爬蟲仍由常駐 worker 執行**，因此部署排程器前 worker 必須在線，否則任務會卡在佇列無人消費。
+- 與 worker / producer **共用同一個映像**（`rfvwsx527/credit-card-crawler:1.0`），只是啟動指令改成 `python -m crawler.scheduler`，**不需另建映像**。
+- 清空只在派工時做一次，worker 全程 `append`，避免多個平行 worker 互相清空（沿用既有架構）。
+- 「爬完」採「佇列深度 + 進行中任務」雙重判定，並要求連續多次閒置才收工，避免 worker 還沒接手就被誤判為已爬完。
+- 任一階段失敗只記 log、不讓排程器整個崩潰，下一晚會再跑一輪。
+
+### 前置
+
+需先完成上方「分散式爬蟲」的部署：`my_swarm_network`、`mysql_mysql`、`rabbitmq`、以及**常駐 worker**（`docker-compose-card-crawler-worker.yml`）都已啟動。
+
+> 映像需含排程器與清理程式：`Dockerfile` 已把 `crawler/scheduler.py`、`clean_credit_cards.py`、`ctbc_cards.csv` 打包，`requirements.txt` 已加入 `APScheduler`、`loguru`。改過這些檔案後就要重新 build 映像。
+
+### 部署步驟
+
+```bash
+# ① 重新建置並推送映像（已含 scheduler.py / clean_credit_cards.py / apscheduler / loguru）
+#    ★ 必須在 crawler_dist/（有 Dockerfile 與 crawler/ 的那層）執行
+docker build -t rfvwsx527/credit-card-crawler:1.0 .
+docker push rfvwsx527/credit-card-crawler:1.0
+
+# ② 部署常駐排程器（每天 21:00 自動跑）
+docker stack deploy -c docker-compose-card-scheduler.yml card_scheduler
+
+# ③ 看排程器 log
+docker service logs card_scheduler_card_scheduler -f
+```
+
+> ⚠️ `scheduler.py` 必須位於 `crawler/scheduler.py`（套件內），啟動方式為 `python -m crawler.scheduler`；切勿放最上層或用 `python crawler/scheduler.py`，否則 `from crawler.worker import app` 會匯入失敗。
+
+### 立即驗證（不想等到晚上）
+
+兩種方式擇一：
+
+```bash
+# 法 A：把 docker-compose-card-scheduler.yml 內 RUN_ON_START 改成 1 後重新部署
+#       → 容器一啟動就先跑一輪
+docker stack deploy -c docker-compose-card-scheduler.yml card_scheduler
+
+# 法 B：暫時把 compose 內 CRAWL_HOUR / CRAWL_MINUTE 改成接近現在的時間後重新部署
+```
+
+### 可調參數（環境變數，寫在 `docker-compose-card-scheduler.yml`）
+
+| 變數 | 預設 | 說明 |
+|------|------|------|
+| `CRAWL_HOUR` / `CRAWL_MINUTE` | `21` / `0` | 每天觸發時間 |
+| `RUN_ON_START` | `0` | 設 `1` → 啟動後立即先跑一輪（測試用） |
+| `WAIT_TIMEOUT_SEC` | `10800` | 等爬完的逾時上限（秒），預設 3 小時 |
+| `POLL_INTERVAL_SEC` | `20` | 輪詢佇列間隔（秒） |
+| `IDLE_CONFIRM` | `3` | 連續幾次判定閒置才算爬完 |
+
+> ⚠️ `db_common` 讀 `MYSQL_ACCOUNT`、`clean_credit_cards` 讀 `MYSQL_USER`，compose 內兩者已設成相同值（`root`），請務必保持一致，否則清理與派工會連到不同帳號。
+
+### 確認跑完
+
+排程器 log 會依序印出 ①／②／③ 三階段，清理完成會看到：
+
+```
+③ 資料清理完成 → *_clean / dashboard_agg 已更新
+```
+
+也可用上方「如何監控爬完了沒」的查佇列指令，確認 `ptt` / `banks` / `card_stats` 三佇列都歸 0。
+
+---
+
 ## 🧹 資料清理（`clean_credit_cards.py`）
 
 將原始爬蟲資料清理、特徵工程後寫回 MySQL：
@@ -322,3 +402,4 @@ export DB_PASSWORD=<your_password>
 - PTT 爬蟲預設 0.4 秒請求間隔，請勿縮短
 - 中信（ctbc）預設使用 `ctbc_cards.csv` 靜態清單；官網改版時直接編輯 CSV 即可更新，動態爬取失敗時也會自動 fallback 至此清單
 - 部分銀行官網有 WAF 防護，若動態爬取失敗會自動 fallback 至靜態清單
+- 排程器與 worker / producer 共用同一個映像，改了 `crawler/`、`clean_credit_cards.py`、`requirements.txt` 或 `Dockerfile` 後需重新 build 並 push，再 `docker service update --force` 對應服務才會生效

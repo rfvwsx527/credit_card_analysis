@@ -8,3 +8,5 @@ PyMySQL==1.1.1
 cryptography==44.0.0
 playwright==1.49.1
 lxml==5.3.0
+APScheduler==3.10.4
+loguru==0.7.2
