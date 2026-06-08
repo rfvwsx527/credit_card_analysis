@@ -150,7 +150,41 @@
 
 ---
 
-### 🛠️ 6. 使用工具與開發進度
+### 🔌 6. API 服務（FastAPI）
+
+在原本「Celery + RabbitMQ + Docker Swarm」爬蟲之上，新增 **`crawler_dist_api/`** 子專案，加一層 **FastAPI 服務**，把資料與爬蟲控制都包成 HTTP API，不必登進機器下 `docker` 指令。API 映像很輕量（**不含** Playwright / 爬蟲程式），只負責查 MySQL、送 Celery 任務。
+
+**兩大功能**
+
+| 功能 | 說明 |
+|------|------|
+| **資料查詢（GET）** | 對外提供爬好的銀行信用卡、PTT 討論、金管會統計、儀表板彙整資料（JSON）；優先讀清理表（`*_clean` / `dashboard_agg`），清理表未建時自動退回原始表 |
+| **爬蟲控制平面（POST／GET）** | 透過 RabbitMQ 派工觸發分散式爬蟲、查三個佇列（`ptt` / `banks` / `card_stats`）深度；行為對齊既有 producer：**派工前清空一次，worker 全程只 append** |
+
+**主要端點**（互動式文件：`http://<host>:8887/docs` Swagger、`/redoc`）
+
+| 端點 | 方法 | 說明 |
+|------|------|------|
+| `/api/v1/banks`、`/banks/by-bank` | GET | 信用卡列表、各銀行卡片張數 |
+| `/api/v1/ptt`、`/ptt/by-month` | GET | PTT 文章（內文預設不帶，加 `?include_content=true`）、每月貼文量 |
+| `/api/v1/stats` | GET | 金管會發卡統計 |
+| `/api/v1/dashboard`、`/dashboard/metrics` | GET | 儀表板彙整（依 `metric` 分組）、列出所有 metric |
+| `/api/v1/crawl/queues` | GET | 查三佇列深度（皆 0 = 爬完） |
+| `/api/v1/crawl/banks`、`/crawl/ptt`、`/crawl/ptt/all`、`/crawl/stats` | POST | 派工爬蟲（指定銀行、頁碼範圍、全爬、金管會統計） |
+| `/health` | GET | 健康檢查（含 DB 連線） |
+
+**技術與部署**
+
+- 套件：`fastapi`、`uvicorn`、`sqlalchemy`、`pymysql`、`celery`、`pydantic`（uv 管理）。
+- 沿用爬蟲專案的部署：同一張 overlay 網路 `my_swarm_network`，環境變數命名與 `db_common.py`、爬蟲端 config 相容，可共用同一份 environment。
+- 以 `docker-compose-api-swarm.yml` 部署於 Swarm，對外埠 `8887`。
+- 注意：`/crawl/ptt/all` 的頁數估算在 worker 端執行，需 worker 映像含 `crawler.tasks_ptt.crawl_ptt_all` 任務，只重 build 本 API 不會讓該端點生效。
+
+> 詳細端點參數、本機開發與部署步驟、環境變數請參閱：[crawler_dist_api/README.md](./crawler_dist_api/README.md)
+
+---
+
+### 🛠️ 7. 使用工具與開發進度
 
 | 類別 | 工具 | 狀態 |
 |------|------|------|
@@ -163,13 +197,14 @@
 | 資料清理管線 | Python、SQLAlchemy | ✅ 完成 |
 | 儀表板 | Python、Streamlit | ✅ 完成 |
 | 資料庫 | MySQL | ✅ 完成 |
+| API 服務 | Python、FastAPI、Uvicorn | ✅ 完成 |
 | 容器管理 | Portainer、Docker Swarm | ✅ 完成 |
 | 排程工作流 | Airflow(目前是APScheduler) | 🚧 處理中 |
 | 雲端平台 | GCP | 🚧 處理中 |
 
 ---
 
-### ⚠️ 7. 注意事項
+### ⚠️ 8. 注意事項
 
 - 資訊結果僅供參考，請依個人判斷做出合適決策
 - 請勿將密碼寫死於程式碼或提交至版控
