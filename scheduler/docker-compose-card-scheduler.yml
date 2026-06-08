@@ -1,0 +1,71 @@
+# Docker Swarm scheduler:每晚 21:00 自動爬蟲 + 爬完自動清理
+# 部署:docker stack deploy -c docker-compose-card-scheduler.yml card_scheduler
+#
+# 角色:常駐排程器(APScheduler)。每天 21:00(Asia/Taipei)
+#   ① 派工(沿用 producer:清空原始表一次 → 任務進佇列)
+#   ② 等三個佇列清空、worker 無進行中任務(= 爬完)
+#   ③ 執行 clean_credit_cards.py 清理 → *_clean / dashboard_agg
+#
+# 前置(與既有 worker/producer 相同):
+#   - my_swarm_network 已建立(docker network create -d overlay my_swarm_network)
+#   - mysql.yml 已部署(服務名 mysql_mysql)、rabbitmq.yml 已部署(rabbitmq)
+#   - 常駐 worker 已啟動(docker-compose-card-crawler-worker.yml)
+#       排程器只負責「派工 + 等待 + 清理」,真正爬蟲由 worker 執行,
+#       因此 worker 必須在線,否則任務會卡在佇列。
+#   - 映像已更新(已把 crawler/scheduler.py、clean_credit_cards.py、
+#     apscheduler、loguru 打包進去):
+#       docker build -t rfvwsx527/credit-card-crawler:1.0 .
+#       docker push    rfvwsx527/credit-card-crawler:1.0
+#
+# 立即驗證一次(不想等到晚上):把 RUN_ON_START 設成 1 後重新部署,
+#   或 docker service update --force card_scheduler_card_scheduler。
+# 查 log:docker service logs card_scheduler_card_scheduler -f
+#
+version: '3.0'
+
+services:
+
+  card_scheduler:
+    image: rfvwsx527/credit-card-crawler:1.0
+    hostname: "card_scheduler"
+    # 必須以模組方式啟動,crawler 套件內的相對匯入才正確(勿用 python crawler/scheduler.py)
+    command: python -m crawler.scheduler
+    deploy:
+      mode: replicated
+      replicas: 1                       # 排程器只需要一個,避免重複觸發
+      placement:
+        constraints: [node.role==manager]
+      restart_policy:
+        condition: any                  # Swarm 下用 restart_policy(等同常駐 restart: always)
+    environment:
+      - TZ=Asia/Taipei                  # 容器時區(APScheduler 另以 Asia/Taipei 計算觸發時間)
+
+      # ── 排程參數 ───────────────────────────────────────────────
+      - CRAWL_HOUR=21                   # 每天 21 點
+      - CRAWL_MINUTE=0                  # 整點 0 分
+      - RUN_ON_START=0                  # 設 1 → 容器啟動後立即先跑一輪(測試用)
+      - WAIT_TIMEOUT_SEC=10800          # 等爬完的逾時上限(秒),預設 3 小時
+      - POLL_INTERVAL_SEC=20            # 輪詢佇列間隔(秒)
+      - IDLE_CONFIRM=3                  # 連續幾次判定閒置才算爬完
+
+      # ── RabbitMQ(派工 + 監控佇列深度用)────────────────────────
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_ACCOUNT=worker
+      - RABBITMQ_PASSWORD=worker
+
+      # ── MySQL(派工建表 + 清理用)──────────────────────────────
+      # 注意:db_common 讀 MYSQL_ACCOUNT;clean_credit_cards 讀 MYSQL_USER。
+      #       兩者請設成相同值,清理與派工才會連到同一個帳號。
+      - MYSQL_HOST=mysql_mysql          # 你的 MySQL swarm 服務名(stack mysql / service mysql)
+      - MYSQL_PORT=3306
+      - MYSQL_ACCOUNT=root
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=ppWgnb_mfGe2m_
+      - MYSQL_DB=mydb
+    networks:
+      - my_swarm_network                # 與 mysql / rabbitmq / worker 同一張 overlay 網路
+
+networks:
+  my_swarm_network:
+    external: true                      # 使用事先建立好的外部 overlay 網路
