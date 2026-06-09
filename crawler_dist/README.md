@@ -277,6 +277,27 @@ docker service logs card_producer_card_producer_ptt --tail 15   # 「已派工 N
 
 ---
 
+## 🧹 資料清理（`clean_credit_cards.py`）
+
+將原始爬蟲資料清理、特徵工程後寫回 MySQL：
+
+| 原始表 | 清理後表 | 主要處理 |
+|--------|----------|----------|
+| `credit_card_stats` | `credit_card_stats_clean` | 民國年轉西元、數值欄轉型、計算淨增卡數、有效卡率、卡均簽帳金額 |
+| `banks` | `banks_clean` | 合併回饋亮點、解析最高回饋率（%）、卡別多標籤展開、適用場景關鍵字標記 |
+| `ptt_credit_card` | `ptt_credit_card_clean` | 推噓數正規化（「爆」→100、「Xn」→負數）、銀行關鍵字提及標記、年月欄位 |
+| — | `dashboard_agg` | 長表彙整（metric / dim / value），供儀表板 KPI 快取使用 |
+
+```bash
+# 清理並寫入（會 TRUNCATE 清理後的表再重寫，不動原始表）
+uv run python clean_credit_cards.py
+
+# 原始表還沒進 DB 時，從 CSV 自動建立
+SEED_FROM_CSV=1 CSV_DIR=./crawler_data uv run python clean_credit_cards.py
+```
+
+---
+
 ## ⏰ 排程自動化（每晚 21:00 自動爬蟲 → 清理）
 
 把「分散式爬蟲」與「資料清理」串成一條**每晚自動執行**的流程，由 `crawler/scheduler.py`（APScheduler 常駐排程器）負責。每天 **21:00（Asia/Taipei）** 觸發一次：
@@ -342,6 +363,34 @@ docker stack deploy -c docker-compose-card-scheduler.yml card_scheduler
 
 > ⚠️ `db_common` 讀 `MYSQL_ACCOUNT`、`clean_credit_cards` 讀 `MYSQL_USER`，compose 內兩者已設成相同值（`root`），請務必保持一致，否則清理與派工會連到不同帳號。
 
+### 調整排程時間（不需重建映像）
+
+觸發時間吃環境變數 `CRAWL_HOUR` / `CRAWL_MINUTE`（24 小時制、台北時間），改時間**不必重 build 映像**；覆寫環境變數後容器會重啟，並以新時間重新註冊排程。
+
+```bash
+# 法一：service update 即時改（例：改成每天 14:30）
+docker service update \
+  --env-add CRAWL_HOUR=14 \
+  --env-add CRAWL_MINUTE=30 \
+  --force card_scheduler_card_scheduler
+```
+
+長期設定建議改 `docker-compose-card-scheduler.yml` 內的 `CRAWL_HOUR` / `CRAWL_MINUTE` 後重新部署（臨時測試用法一即可）：
+
+```bash
+# 法二：寫進 compose 再部署
+docker stack deploy -c docker-compose-card-scheduler.yml card_scheduler
+```
+
+改完看 log 確認新時間已生效：
+
+```bash
+docker service logs card_scheduler_card_scheduler --tail 5
+#   已註冊每日排程：每天 14:30（Asia/Taipei） 爬蟲 → 等爬完 → 資料清理
+```
+
+> 想「幾分鐘後就觸發」測試，把時、分設成比現在晚 2~3 分鐘即可（記得 worker 要在線，否則 ② 等待會卡到逾時）。`--env-add` 對已存在的變數即為覆寫；法一改的是執行中服務狀態，之後若再用舊 compose `stack deploy` 會被蓋回，正式時間請用法二寫進 compose。
+
 ### 確認跑完
 
 排程器 log 會依序印出 ①／②／③ 三階段，清理完成會看到：
@@ -351,27 +400,6 @@ docker stack deploy -c docker-compose-card-scheduler.yml card_scheduler
 ```
 
 也可用上方「如何監控爬完了沒」的查佇列指令，確認 `ptt` / `banks` / `card_stats` 三佇列都歸 0。
-
----
-
-## 🧹 資料清理（`clean_credit_cards.py`）
-
-將原始爬蟲資料清理、特徵工程後寫回 MySQL：
-
-| 原始表 | 清理後表 | 主要處理 |
-|--------|----------|----------|
-| `credit_card_stats` | `credit_card_stats_clean` | 民國年轉西元、數值欄轉型、計算淨增卡數、有效卡率、卡均簽帳金額 |
-| `banks` | `banks_clean` | 合併回饋亮點、解析最高回饋率（%）、卡別多標籤展開、適用場景關鍵字標記 |
-| `ptt_credit_card` | `ptt_credit_card_clean` | 推噓數正規化（「爆」→100、「Xn」→負數）、銀行關鍵字提及標記、年月欄位 |
-| — | `dashboard_agg` | 長表彙整（metric / dim / value），供儀表板 KPI 快取使用 |
-
-```bash
-# 清理並寫入（會 TRUNCATE 清理後的表再重寫，不動原始表）
-uv run python clean_credit_cards.py
-
-# 原始表還沒進 DB 時，從 CSV 自動建立
-SEED_FROM_CSV=1 CSV_DIR=./crawler_data uv run python clean_credit_cards.py
-```
 
 ---
 

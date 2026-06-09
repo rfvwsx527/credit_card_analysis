@@ -39,11 +39,14 @@
 │   ├── crawler/                        # Celery 套件
 │   │   ├── worker.py                   # Celery app（佇列路由）
 │   │   ├── tasks_ptt.py / tasks_banks.py / tasks_fac.py        # 任務定義
-│   │   └── producer_ptt.py / producer_banks.py / producer_card_stats.py  # 派工
+│   │   ├── producer_ptt.py / producer_banks.py / producer_card_stats.py  # 派工
+│   │   └── scheduler.py                # ⭐ 每晚排程器（派工→等爬完→清理）
 │   ├── Dockerfile
 │   ├── mysql.yml                                   # MySQL 8 + phpMyAdmin（Swarm）
 │   ├── docker-compose-card-crawler-worker.yml      # Swarm worker
-│   └── docker-compose-card-crawler-producer.yml    # Swarm producer
+│   ├── docker-compose-card-crawler-producer.yml    # Swarm producer
+│   └── docker-compose-card-scheduler.yml           # ⭐ Swarm 排程器（每晚 21:00）
+├── crawler_dist_api/                   # FastAPI 服務（資料查詢 + 爬蟲控制平面）
 ├── rabbitmq.yml                        # RabbitMQ + Flower
 ├── streamlit/                          # Streamlit 互動式儀表板
 │   ├── app.py                          # 儀表板主程式（讀 clean tables）
@@ -150,7 +153,51 @@
 
 ---
 
-### 🔌 6. API 服務（FastAPI）
+### ⏰ 6. 排程自動化（每晚定時爬蟲 → 清理）
+
+在分散式爬蟲與資料清理之上，新增 **`crawler_dist/crawler/scheduler.py`**（APScheduler 常駐排程器），每天定時（預設 **21:00 Asia/Taipei**）自動把「派工爬蟲 → 等爬完 → 資料清理」串成一條流程，免人工逐步觸發。排程器與 worker / producer **共用同一個爬蟲映像**，只是啟動指令改為 `python -m crawler.scheduler`，**不需另建映像**。
+
+每天 21:00（Asia/Taipei）自動執行：
+
+```
+① 派工：沿用 producer，清空三張原始表各一次 → 任務送進 ptt / banks / card_stats 佇列
+② 等待：輪詢「佇列深度 + worker 進行中任務」，直到全部清空（= 爬完）
+③ 清理：執行 clean_credit_cards.py → 寫入 *_clean / dashboard_agg（原始表不動）
+```
+
+**設計重點**
+
+- 排程器只負責「派工 + 等待 + 清理」，**真正爬蟲仍由常駐 worker 執行**（部署排程器前 worker 必須在線，否則任務會卡在佇列）。
+- 清空只在派工時做一次，worker 全程 `append`，避免多個平行 worker 互相清空。
+- 「爬完」採「佇列深度 + 進行中任務」雙重判定，連續多次閒置才收工，避免 worker 還沒接手就被誤判。
+- 任一階段失敗只記 log、不讓排程器崩潰，下一晚自動再跑一輪。
+
+**可調參數**（環境變數，寫在 `docker-compose-card-scheduler.yml`）
+
+| 變數 | 預設 | 說明 |
+|------|------|------|
+| `CRAWL_HOUR` / `CRAWL_MINUTE` | `21` / `0` | 每天觸發時間（24 小時制、台北時間） |
+| `RUN_ON_START` | `0` | 設 `1` → 容器啟動後立即先跑一輪（測試用） |
+| `WAIT_TIMEOUT_SEC` | `10800` | 等爬完的逾時上限（秒），預設 3 小時 |
+| `POLL_INTERVAL_SEC` | `20` | 輪詢佇列間隔（秒） |
+| `IDLE_CONFIRM` | `3` | 連續幾次判定閒置才算爬完 |
+
+**部署與調整時間**
+
+```bash
+# 部署常駐排程器
+docker stack deploy -c docker-compose-card-scheduler.yml card_scheduler
+
+# 改排程時間（不需重 build；例：改成每天 14:30）
+docker service update --env-add CRAWL_HOUR=14 --env-add CRAWL_MINUTE=30 \
+  --force card_scheduler_card_scheduler
+```
+
+> 詳細部署、立即驗證與監控請參閱：[crawler_dist/README.md](./crawler_dist/README.md) 的「排程自動化」章節。
+
+---
+
+### 🔌 7. API 服務（FastAPI）
 
 在原本「Celery + RabbitMQ + Docker Swarm」爬蟲之上，新增 **`crawler_dist_api/`** 子專案，加一層 **FastAPI 服務**，把資料與爬蟲控制都包成 HTTP API，不必登進機器下 `docker` 指令。API 映像很輕量（**不含** Playwright / 爬蟲程式），只負責查 MySQL、送 Celery 任務。
 
@@ -184,7 +231,7 @@
 
 ---
 
-### 🛠️ 7. 使用工具與開發進度
+### 🛠️ 8. 使用工具與開發進度
 
 | 類別 | 工具 | 狀態 |
 |------|------|------|
@@ -199,12 +246,12 @@
 | 資料庫 | MySQL | ✅ 完成 |
 | API 服務 | Python、FastAPI、Uvicorn | ✅ 完成 |
 | 容器管理 | Portainer、Docker Swarm | ✅ 完成 |
-| 排程工作流 | Airflow(目前是APScheduler) | 🚧 處理中 |
+| 排程工作流 | APScheduler（每晚自動爬蟲→清理；Airflow 規劃中） | ✅ 完成 |
 | 雲端平台 | GCP | 🚧 處理中 |
 
 ---
 
-### ⚠️ 8. 注意事項
+### ⚠️ 9. 注意事項
 
 - 資訊結果僅供參考，請依個人判斷做出合適決策
 - 請勿將密碼寫死於程式碼或提交至版控
